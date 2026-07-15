@@ -8,4 +8,6 @@ The authoring component exists only to identify the turret pivot, optional barre
 
 The included tank demo is fully wired under `/MassBattleSingleTurret/Demo/Tank`: generated mesh, layout, AgentConfig, Renderer Blueprint, Niagara system, plugin material, and material instances. It was derived from the MassBattleFrame demo tank without modifying MassBattleFrame.
 
+Two standalone benchmark maps are included under `/MassBattleSingleTurret/Demo/Benchmark`. They run separate 5,000-vs-5,000 formations with a forced `+/-75 degree` turret sweep and wall-clock frame timing. On the current test machine, the plugin tank measured P50/P95 `167.418/174.929 ms`; the original four-entity demo composition measured `1250.564/1576.489 ms`. This is a whole-architecture comparison, not a turret-arithmetic-only microbenchmark.
+
 This design removes structural overhead; it is not literally compute-free. Tagged turret units still pay for a compact per-entity state update, one packed 32-bit style value, Niagara transfer, and vertex articulation. See [README_ZH.md](README_ZH.md) and [Docs/04_Performance_ZH.md](Docs/04_Performance_ZH.md).

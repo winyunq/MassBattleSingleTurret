@@ -94,6 +94,15 @@ VATDataAsset      仅在启用 VAT 时生成
 
 Demo 旧坦克有 4 个 `MassBattleAgentComponent`（Vehicle/Turret/MachineGun/Cannon），新坦克是 1 个 Mass 实体，结构上减少 75% 的实体数量；这不是 FPS 声明。可重复的微基准与正式场景对照方法见 [性能设计](Docs/04_Performance_ZH.md)。
 
+插件还包含两张互不混跑的 5000 对 5000 基准地图：
+
+```text
+/MassBattleSingleTurret/Demo/Benchmark/Map_MBST_Legacy_5000v5000
+/MassBattleSingleTurret/Demo/Benchmark/Map_MBST_SingleTurret_5000v5000
+```
+
+两边固定同一队形、相机、分辨率、20 秒墙钟采样和每帧炮塔更新；炮塔按 `±75° / 8 s` 强制往复。为避免死亡减员和武器/寻路掩盖结构差异，计时窗口关闭攻击、Trace、移动和调试，表现保持开启；视觉齐射只出现在预热截图中。当前机器的正式结果为插件 `P50 167.418 ms / P95 174.929 ms`，旧 Demo `P50 1250.564 ms / P95 1576.489 ms`。完整条件、命令和限制见性能文档。
+
 ## 验证
 
 静态验证：
@@ -110,6 +119,7 @@ MassBattle.SingleTurret.Authoring.GenerateDemoTank
 MassBattle.SingleTurret.Authoring.ConfigureDemoNiagaraStyleArray
 MassBattle.SingleTurret.Performance.DemoTankStructure
 MassBattle.SingleTurret.Performance.PackingMicrobenchmark
+MassBattle.SingleTurret.Benchmark.CreateDemoMaps
 ```
 
 ## 当前范围

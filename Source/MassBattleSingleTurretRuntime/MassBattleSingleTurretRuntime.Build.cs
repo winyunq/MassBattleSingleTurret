@@ -27,6 +27,7 @@ public class MassBattleSingleTurretRuntime : ModuleRules
 
         PrivateDependencyModuleNames.AddRange(new[]
         {
+            "Json",
             "Projects",
             "RenderCore"
         });

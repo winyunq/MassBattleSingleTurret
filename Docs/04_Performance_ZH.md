@@ -76,16 +76,64 @@ FMBSTSingleTurretShared       40 B/shared layout value
 5. 材质顶点阶段的解包和三角函数；
 6. 旧方案是否对炮塔/武器使用独立剔除。
 
-## 公平的 FPS/Unreal Insights 对照
+## 已实现的 5000 对 5000 场景对照
 
-不要把旧 BP Actor 数量与新 Mass Entity 数量混在同一场景。建议复制同一张性能地图，建立两个独立 Variant：
+仓库内已经建立两个互不混跑的地图 Variant：
 
 ```text
-A：原 BP_TankActor / 原 AgentConfig，数量 N
-B：Tank_SingleTurret_AgentConfig，数量 N
+/MassBattleSingleTurret/Demo/Benchmark/Map_MBST_Legacy_5000v5000
+/MassBattleSingleTurret/Demo/Benchmark/Map_MBST_SingleTurret_5000v5000
 ```
 
-两边必须固定：相同位置、相同相机路径、LOD/Cull、阴影、攻击开关、Tick Budget、预热时间和统计窗口。至少采集：
+两张地图都由插件自己的 `AMBSTSingleTurretBenchmarkActor` 驱动，不修改 MassBattleFrame。默认条件：
+
+```text
+两队各 5000 辆，50 x 100 队形，500 uu 间距
+1920 x 1080，ScreenPercentage 100，VSync/MaxFPS/MotionBlur 关闭
+炮塔每帧强制往复：±75°，8 秒周期
+真实墙钟预热至少 10 秒；真实墙钟正式采样 20 秒
+攻击、Trace、移动和调试关闭；Visualize 开启
+视觉齐射仅用于预热截图，不进入正式采样
+原蓝图 LogBlueprintUserMessages 关闭，避免磁盘日志污染
+```
+
+旧场景逐辆生成原 `/MassBattle/Test/CompoundUnitAsset/BP_TankActor`，每辆保留原来的 4 个 Agent 实体；插件场景直接从 `Tank_SingleTurret_AgentConfig` 生成，每辆 1 个实体。二者不在同一进程中混跑。
+
+2026-07-16 当前机器 Development Editor、RenderOffscreen 的正式墙钟结果：
+
+| 指标 | 旧 Demo 复合坦克 | 插件单实体坦克 | 旧/新帧时间倍率 |
+|---|---:|---:|---:|
+| 坦克数 | 10,000 | 10,000 | 1.00x |
+| Mass 单位实体 | 40,000 | 10,000 | 4.00x |
+| 样本数 | 16 | 119 | - |
+| 平均帧时间 | 1306.829 ms | 169.152 ms | 7.73x |
+| 平均 FPS | 0.765 | 5.912 | 7.73x |
+| P50 | 1250.564 ms | 167.418 ms | 7.47x |
+| P95 | 1576.489 ms | 174.929 ms | 9.01x |
+| P99 | 2054.399 ms | 177.613 ms | 11.57x |
+| Max | 2173.877 ms | 1016.550 ms | 2.14x |
+
+JSON 中的 `frame_timing_source` 为 `FPlatformTime wall-clock interval`，避免低帧率时 UE 把 `DeltaSeconds` 截到 400 ms 而得到假结果。结果文件和截图默认写入：
+
+```text
+Saved/MassBattleSingleTurret/Benchmark5000
+```
+
+命令行可调参数：
+
+```text
+-MBSTTanksPerSide=5000
+-MBSTWarmup=10
+-MBSTSample=20
+-MBSTLegacySpawnPerFrame=250
+-MBSTOutputDir=<absolute directory>
+-MBSTSkipScreenshots
+-MBSTNoExit
+```
+
+这个结果衡量的是“实际旧 Demo 复合 Actor/多实体/多表现实例”与“插件直接生成的单实体炮塔坦克”的整体差异，不是只隔离炮塔算术的微基准。旧 Demo 还保留 10,000 个 Blueprint Actor，而插件路径运行时不保留 Actor；因此倍率不能解释成单个 Fragment 或单个 Processor 本身快了 7.73 倍。
+
+若做项目发布前的 Unreal Insights 对照，仍应至少采集：
 
 ```text
 Game Thread / Mass Processing
@@ -96,8 +144,6 @@ GPU BasePass / ShadowDepths
 Draw Calls / Instances / Triangles
 FrameTime P50 / P95 / P99
 ```
-
-当前仓库给出结构验证和 CPU 打包微基准，但没有伪造场景 FPS。只有完成上述同场景对照后，才应宣称具体帧率收益。
 
 ## 后续可选优化
 

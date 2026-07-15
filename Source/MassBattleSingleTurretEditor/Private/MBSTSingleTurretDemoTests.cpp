@@ -3,6 +3,7 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "MBSTSingleTurretAsset.h"
+#include "MBSTSingleTurretBenchmark.h"
 #include "DataAssets/MassBattleAgentConfigDataAsset.h"
 #include "Components/ActorComponent.h"
 #include "Engine/Blueprint.h"
@@ -15,6 +16,62 @@
 #include "NiagaraSystem.h"
 #include "Subsystems/EditorAssetSubsystem.h"
 #include "Editor.h"
+#include "FileHelpers.h"
+#include "GameFramework/WorldSettings.h"
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FMBSTCreateBenchmarkMapsTest,
+    "MassBattle.SingleTurret.Benchmark.CreateDemoMaps",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMBSTCreateBenchmarkMapsTest::RunTest(const FString& Parameters)
+{
+    struct FMapSpec
+    {
+        const TCHAR* PackagePath;
+        EMBSTBenchmarkScenario Scenario;
+    };
+    const FMapSpec Specs[] =
+    {
+        { TEXT("/MassBattleSingleTurret/Demo/Benchmark/Map_MBST_Legacy_5000v5000"), EMBSTBenchmarkScenario::LegacyCompound },
+        { TEXT("/MassBattleSingleTurret/Demo/Benchmark/Map_MBST_SingleTurret_5000v5000"), EMBSTBenchmarkScenario::SingleTurret }
+    };
+
+    bool bAllSaved = true;
+    for (const FMapSpec& Spec : Specs)
+    {
+        UWorld* World = UEditorLoadingAndSavingUtils::NewBlankMap(false);
+        if (!TestNotNull(TEXT("New benchmark world"), World))
+        {
+            return false;
+        }
+        AWorldSettings* WorldSettings = World->GetWorldSettings();
+        if (!TestNotNull(TEXT("Benchmark world settings"), WorldSettings))
+        {
+            return false;
+        }
+        WorldSettings->DefaultGameMode = AMBSTSingleTurretBenchmarkGameMode::StaticClass();
+        WorldSettings->bForceNoPrecomputedLighting = true;
+
+        AMBSTSingleTurretBenchmarkActor* Controller = World->SpawnActor<AMBSTSingleTurretBenchmarkActor>(
+            FVector::ZeroVector,
+            FRotator::ZeroRotator);
+        if (!TestNotNull(TEXT("Benchmark controller"), Controller))
+        {
+            return false;
+        }
+        Controller->Scenario = Spec.Scenario;
+        Controller->TanksPerSide = 5000;
+        Controller->WarmupSeconds = 10.0f;
+        Controller->SampleSeconds = 20.0f;
+        Controller->LegacyActorsPerFrame = 250;
+
+        const bool bSaved = UEditorLoadingAndSavingUtils::SaveMap(World, Spec.PackagePath);
+        TestTrue(FString::Printf(TEXT("Saved %s"), Spec.PackagePath), bSaved);
+        bAllSaved &= bSaved;
+    }
+    return bAllSaved;
+}
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
     FMBSTGenerateDemoTankTest,
