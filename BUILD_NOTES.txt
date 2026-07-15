@@ -1,0 +1,35 @@
+MassBattleSingleTurret 0.2.0-beta
+Prepared: 2026-07-15
+Prototype ZIP SHA-256: 3addbb6dd7008bf21c1027382e1c473b26a7eec58e0c21d2047969790129a676
+
+Implemented and verified in D:\UE5Project\Winyunq:
+- Independent nested Git repository under Plugins/MassBattleSingleTurret
+- No MassBattleFrame source or asset modification
+- Actor authoring marker with direct component binding and tag fallback
+- Actor conversion always creates a new AgentConfig
+- Optional normal AgentConfig is duplicated and never modified in place
+- Generated config automatically embeds exactly one turret Tag, State Fragment and Mutable Shared Fragment
+- One merged tank mesh with 3 LODs, layout asset and pivot sockets
+- Plugin Niagara with an independent User.StyleArray Array Int32 data interface
+- Exact 32-bit state transfer through two 16-bit Dynamic Parameter halves
+- Plugin-owned VAT material and six tank material instances
+- Plugin Renderer Blueprint wired to generated mesh and Niagara
+- Generated AgentConfig wired to plugin Renderer Class
+- Runtime tagged Mass processor, control Blueprint API and CPU muzzle reconstruction
+- Structural comparison and repeatable packing microbenchmark automation tests
+
+Build status:
+- Targeted WinyunqEditor build of MassBattleSingleTurretRuntime and MassBattleSingleTurretEditor: PASS
+- Full project build is currently blocked by an unrelated pre-existing MassBattleEditorMCP compile error (RootLockIssueCount); this plugin does not modify that module
+
+Asset/runtime validation:
+- GenerateDemoTank automation: PASS
+- ConfigureDemoNiagaraStyleArray automation: PASS
+- DemoTankStructure automation: PASS (legacy 4 agents vs plugin 1 entity, 75% reduction)
+- PackingMicrobenchmark automation: PASS (18.091 ns/entity median on this machine; State 24 B, packed payload 4 B, Shared 40 B)
+- Niagara compile: UpToDate, no warnings/errors
+- Plugin material compile: PASS
+- AgentConfig/Renderer/Mesh/Niagara references saved and verified
+
+Known beta limitation:
+- Geometry articulation is wired; full articulated normal/tangent handling is not yet connected to the inherited VAT material shading chain

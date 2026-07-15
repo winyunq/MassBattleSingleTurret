@@ -1,0 +1,38 @@
+{
+  "FileVersion": 3,
+  "Version": 20000,
+  "VersionName": "0.2.0-beta",
+  "FriendlyName": "MassBattle Single Turret",
+  "Description": "Single-Agent GPU articulation and Actor-to-VAT preparation for MassBattle vehicles with one turret/weapon station.",
+  "Category": "MassBattle",
+  "CreatedBy": "OpenAI",
+  "CanContainContent": true,
+  "IsBetaVersion": true,
+  "Installed": false,
+  "Modules": [
+    {
+      "Name": "MassBattleSingleTurretRuntime",
+      "Type": "Runtime",
+      "LoadingPhase": "PostConfigInit"
+    },
+    {
+      "Name": "MassBattleSingleTurretEditor",
+      "Type": "Editor",
+      "LoadingPhase": "PostEngineInit"
+    }
+  ],
+  "Plugins": [
+    {
+      "Name": "MassBattle",
+      "Enabled": true
+    },
+    {
+      "Name": "AnimToTexture",
+      "Enabled": true
+    },
+    {
+      "Name": "Niagara",
+      "Enabled": true
+    }
+  ]
+}

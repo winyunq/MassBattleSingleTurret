@@ -1,0 +1,34 @@
+// Material Custom node. Output type: CMOT Float3 (object-space delta).
+// PositionObject        float3 = PreSkinnedLocalPosition
+// VertexMask           float4 = VertexColor
+// PackedLowHigh        float2 = DynamicMaterialParameter1.xy
+// TurretPivotObject    float3 = MBST_TurretPivot
+// TurretAxisObject     float3 = MBST_TurretAxis
+// BarrelPivotObject    float3 = MBST_BarrelPivot
+// BarrelAxisObject     float3 = MBST_BarrelAxis
+// BarrelForwardObject  float3 = MBST_BarrelForward
+// MaxRecoilDistance    float  = MBST_MaxRecoilDistance
+#include "/Plugin/MassBattleSingleTurret/Private/MBSTSingleTurret.ush"
+
+int PackedState = MBST_CombinePackedUInt16Halves(PackedLowHigh);
+int VisualStyle;
+float4 YawPitchSinCos;
+float RecoilNormalized;
+MBST_DecodePackedStateSinCos(
+    PackedState,
+    VisualStyle,
+    YawPitchSinCos,
+    RecoilNormalized);
+
+float3 ArticulatedPositionObject = MBST_ArticulatePositionObjectSpace(
+    PositionObject,
+    VertexMask,
+    TurretPivotObject,
+    TurretAxisObject,
+    BarrelPivotObject,
+    BarrelAxisObject,
+    BarrelForwardObject,
+    YawPitchSinCos,
+    RecoilNormalized * MaxRecoilDistance);
+
+return ArticulatedPositionObject - PositionObject;

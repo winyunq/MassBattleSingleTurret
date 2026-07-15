@@ -1,0 +1,5 @@
+// Niagara Custom HLSL
+// Input: int PackedState
+// Outputs: int VisualStyle, float4 YawPitchSinCos, float RecoilNormalized
+#include "/Plugin/MassBattleSingleTurret/Private/MBSTSingleTurret.ush"
+MBST_DecodePackedStateSinCos(PackedState, VisualStyle, YawPitchSinCos, RecoilNormalized);
