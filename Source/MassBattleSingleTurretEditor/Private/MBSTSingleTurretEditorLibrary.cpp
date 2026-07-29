@@ -1,6 +1,7 @@
 #include "MBSTSingleTurretEditorLibrary.h"
 
 #include "MassBattleSingleTurretEditor.h"
+#include "MBSTMobileFireProfile.h"
 #include "MBSTSingleTurretAsset.h"
 #include "MBSTSingleTurretAuthoringComponent.h"
 #include "MBSTSingleTurretTypes.h"
@@ -19,6 +20,12 @@
 #include "Engine/StaticMesh.h"
 #include "Engine/StaticMeshSocket.h"
 #include "GameFramework/Actor.h"
+#include "MaterialEditingLibrary.h"
+#include "Materials/Material.h"
+#include "Materials/MaterialAttributeDefinitionMap.h"
+#include "Materials/MaterialExpressionCustom.h"
+#include "Materials/MaterialExpressionSetMaterialAttributes.h"
+#include "Materials/MaterialExpressionTransform.h"
 #include "Materials/MaterialInstanceConstant.h"
 #include "MeshDescription.h"
 #include "MeshUtilities.h"
@@ -31,6 +38,7 @@
 #include "NiagaraTypes.h"
 #include "Renderers/MassBattleAgentRenderer.h"
 #include "StaticMeshAttributes.h"
+#include "StaticMeshOperations.h"
 #include "StructUtils/InstancedStruct.h"
 #include "UObject/Package.h"
 #include "UObject/UnrealType.h"
@@ -522,66 +530,142 @@ namespace MBSTEditorPrivate
         return bPaintedAnyLOD;
     }
 
-    static UWorld* GetEditorWorld()
-    {
-        return GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
-    }
-
     static UStaticMesh* MergePaintedGroups(
         const TArray<UStaticMesh*>& GroupMeshes,
         const FString& FinalPackageName,
         const FMBSTActorToSingleTurretSettings& Settings,
         TArray<FString>& OutMessages)
     {
-        UWorld* World = GetEditorWorld();
-        if (!World)
+        if (!FPackageName::IsValidLongPackageName(FinalPackageName))
         {
-            OutMessages.Add(TEXT("No Editor World is available for the final group merge."));
+            OutMessages.Add(FString::Printf(TEXT("Invalid final mesh package name '%s'."), *FinalPackageName));
             return nullptr;
         }
 
-        FActorSpawnParameters SpawnParameters;
-        SpawnParameters.ObjectFlags = RF_Transient;
-        SpawnParameters.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-        AActor* StagingActor = World->SpawnActor<AActor>(AActor::StaticClass(), FTransform::Identity, SpawnParameters);
-        if (!StagingActor)
+        TArray<UStaticMesh*> ValidMeshes;
+        int32 NumLODs = MAX_int32;
+        for (UStaticMesh* Mesh : GroupMeshes)
         {
-            OutMessages.Add(TEXT("Failed to spawn the transient merge staging Actor."));
-            return nullptr;
-        }
-
-        USceneComponent* Root = NewObject<USceneComponent>(StagingActor, TEXT("MBSTMergeRoot"), RF_Transient);
-        StagingActor->SetRootComponent(Root);
-        Root->RegisterComponent();
-
-        TArray<UMeshComponent*> StageComponents;
-        for (int32 Index = 0; Index < GroupMeshes.Num(); ++Index)
-        {
-            UStaticMesh* Mesh = GroupMeshes[Index];
-            if (!Mesh)
+            if (!IsValid(Mesh))
             {
                 continue;
             }
-
-            UStaticMeshComponent* MeshComponent = NewObject<UStaticMeshComponent>(
-                StagingActor,
-                *FString::Printf(TEXT("MBSTGroup_%d"), Index),
-                RF_Transient);
-            MeshComponent->SetupAttachment(Root);
-            MeshComponent->SetStaticMesh(Mesh);
-            MeshComponent->SetRelativeTransform(FTransform::Identity);
-            MeshComponent->RegisterComponent();
-            StageComponents.Add(MeshComponent);
+            ValidMeshes.Add(Mesh);
+            NumLODs = FMath::Min(NumLODs, Mesh->GetNumSourceModels());
+        }
+        if (ValidMeshes.IsEmpty() || NumLODs <= 0 || NumLODs == MAX_int32)
+        {
+            OutMessages.Add(TEXT("No painted source MeshDescription LODs were available for the final merge."));
+            return nullptr;
         }
 
-        UStaticMesh* Result = ConvertGroup(
-            StageComponents,
-            FTransform::Identity,
-            FinalPackageName,
-            Settings,
-            OutMessages);
+        const FString AssetName = FPackageName::GetLongPackageAssetName(FinalPackageName);
+        const FString ObjectPath = FString::Printf(TEXT("%s.%s"), *FinalPackageName, *AssetName);
+        if (FindObject<UObject>(nullptr, *ObjectPath))
+        {
+            OutMessages.Add(FString::Printf(TEXT("Asset already exists: %s"), *ObjectPath));
+            return nullptr;
+        }
 
-        World->DestroyActor(StagingActor, false, false);
+        UPackage* Package = CreatePackage(*FinalPackageName);
+        UStaticMesh* Result = NewObject<UStaticMesh>(
+            Package,
+            *AssetName,
+            RF_Public | RF_Standalone | RF_Transactional);
+        if (!Result)
+        {
+            OutMessages.Add(FString::Printf(TEXT("Failed to create final static mesh '%s'."), *ObjectPath));
+            return nullptr;
+        }
+
+        Result->InitResources();
+        Result->SetLightingGuid();
+        Result->SetImportVersion(EImportStaticMeshVersion::LastVersion);
+        Result->SetNumSourceModels(NumLODs);
+
+        // Preserve the source material slots by name. AppendMeshDescriptions uses
+        // the polygon-group material slot name when combining geometry.
+        TMap<FName, UMaterialInterface*> MaterialsBySlot;
+        for (UStaticMesh* Mesh : ValidMeshes)
+        {
+            for (const FStaticMaterial& Material : Mesh->GetStaticMaterials())
+            {
+                const FName SlotName = !Material.MaterialSlotName.IsNone()
+                    ? Material.MaterialSlotName
+                    : Material.ImportedMaterialSlotName;
+                if (UMaterialInterface** Existing = MaterialsBySlot.Find(SlotName))
+                {
+                    if (*Existing != Material.MaterialInterface)
+                    {
+                        OutMessages.Add(FString::Printf(
+                            TEXT("Cannot merge material slot '%s': different source materials use the same slot name."),
+                            *SlotName.ToString()));
+                        Result->ClearFlags(RF_Public | RF_Standalone);
+                        Package->SetDirtyFlag(false);
+                        return nullptr;
+                    }
+                    continue;
+                }
+                MaterialsBySlot.Add(SlotName, Material.MaterialInterface);
+                Result->GetStaticMaterials().Add(Material);
+            }
+        }
+
+        FStaticMeshOperations::FAppendSettings AppendSettings;
+        AppendSettings.bMergeVertexColor = true;
+        for (int32 UVIndex = 0; UVIndex < FStaticMeshOperations::FAppendSettings::MAX_NUM_UV_CHANNELS; ++UVIndex)
+        {
+            AppendSettings.bMergeUVChannels[UVIndex] = true;
+        }
+
+        for (int32 LODIndex = 0; LODIndex < NumLODs; ++LODIndex)
+        {
+            TArray<const FMeshDescription*> SourceDescriptions;
+            SourceDescriptions.Reserve(ValidMeshes.Num());
+            for (UStaticMesh* Mesh : ValidMeshes)
+            {
+                const FMeshDescription* Description = Mesh->GetMeshDescription(LODIndex);
+                if (!Description)
+                {
+                    OutMessages.Add(FString::Printf(
+                        TEXT("Mesh '%s' has no MeshDescription for LOD %d."),
+                        *Mesh->GetName(),
+                        LODIndex));
+                    Result->ClearFlags(RF_Public | RF_Standalone);
+                    Package->SetDirtyFlag(false);
+                    return nullptr;
+                }
+                SourceDescriptions.Add(Description);
+            }
+
+            FMeshDescription CombinedDescription;
+            FStaticMeshAttributes(CombinedDescription).Register();
+            FStaticMeshOperations::AppendMeshDescriptions(
+                SourceDescriptions,
+                CombinedDescription,
+                AppendSettings);
+
+            Result->CreateMeshDescription(LODIndex, MoveTemp(CombinedDescription));
+            Result->CommitMeshDescription(LODIndex);
+
+            FStaticMeshSourceModel& TargetSourceModel = Result->GetSourceModel(LODIndex);
+            const FStaticMeshSourceModel& ReferenceSourceModel = ValidMeshes[0]->GetSourceModel(LODIndex);
+            TargetSourceModel.BuildSettings = ReferenceSourceModel.BuildSettings;
+            TargetSourceModel.ReductionSettings = ReferenceSourceModel.ReductionSettings;
+            TargetSourceModel.ScreenSize = ReferenceSourceModel.ScreenSize;
+            TargetSourceModel.BuildSettings.bGenerateLightmapUVs = Settings.bGenerateLightmapUVs;
+            if (Settings.bGenerateLightmapUVs)
+            {
+                TargetSourceModel.BuildSettings.DstLightmapIndex = Settings.LightmapDestinationUV;
+            }
+        }
+
+        Result->SetLightMapCoordinateIndex(Settings.bGenerateLightmapUVs ? Settings.LightmapDestinationUV : 0);
+        Result->Build(false);
+        Result->PostEditChange();
+        Result->MarkPackageDirty();
+        FAssetRegistryModule::AssetCreated(Result);
+
         return Result;
     }
 
@@ -1000,6 +1084,39 @@ FMBSTActorToSingleTurretResult UMBSTSingleTurretEditorLibrary::ConvertActorToSin
         return Result;
     }
 
+    int64 BodyVertexCount = 0;
+    int64 TurretVertexCount = 0;
+    int64 BarrelVertexCount = 0;
+    int64 InvalidVertexCount = 0;
+    int64 BodyVATVertexCount = 0;
+    const bool bReadableMasks = MBSTEditorPrivate::ReadMaskStatistics(
+        Result.ArticulatedMesh,
+        BodyVertexCount,
+        TurretVertexCount,
+        BarrelVertexCount,
+        InvalidVertexCount,
+        BodyVATVertexCount);
+    Result.Messages.Add(FString::Printf(
+        TEXT("Generated mask counts: Body=%lld, Turret=%lld, Barrel=%lld, BodyVAT=%lld, Invalid=%lld."),
+        BodyVertexCount,
+        TurretVertexCount,
+        BarrelVertexCount,
+        BodyVATVertexCount,
+        InvalidVertexCount));
+    if (!bReadableMasks
+        || BodyVertexCount == 0
+        || TurretVertexCount == 0
+        || InvalidVertexCount > 0
+        || (Authoring->bBodyUsesVAT && BodyVATVertexCount == 0))
+    {
+        Result.Messages.Add(TEXT(
+            "Conversion stopped because the final mesh did not preserve the required body/turret vertex masks."));
+        Result.ArticulatedMesh->ClearFlags(RF_Public | RF_Standalone);
+        Result.ArticulatedMesh->GetOutermost()->SetDirtyFlag(false);
+        Result.ArticulatedMesh = nullptr;
+        return Result;
+    }
+
     Result.ArticulatedMesh->Modify();
     const FVector BoundsExtension(Settings.BoundsExtension);
     Result.ArticulatedMesh->SetPositiveBoundsExtension(BoundsExtension);
@@ -1129,6 +1246,8 @@ FMBSTActorToSingleTurretResult UMBSTSingleTurretEditorLibrary::ConvertActorToSin
             SafePackagePath,
             SafeAssetName + TEXT("_AgentConfig"),
             Settings.InitialTurretState,
+            Settings.MobileFireProfile,
+            Settings.InitialMobileFireState,
             ConfigMessage);
         if (!ConfigMessage.IsEmpty())
         {
@@ -1411,6 +1530,237 @@ FMBSTAssetValidationResult UMBSTSingleTurretEditorLibrary::ValidateGeneratedArti
     return Result;
 }
 
+bool UMBSTSingleTurretEditorLibrary::ConfigureArticulationBaseMaterial(
+    UMaterial* Material,
+    FString& OutMessage)
+{
+    OutMessage.Reset();
+    if (!IsValid(Material))
+    {
+        OutMessage = TEXT("Material is invalid.");
+        return false;
+    }
+
+    constexpr TCHAR PositionFunctionName[] = TEXT("MBST_ArticulatePositionObjectSpace");
+    constexpr TCHAR NormalFunctionName[] = TEXT("MBST_ArticulateNormalObjectSpace");
+    constexpr TCHAR NormalOutputMarker[] = TEXT("MBST normal: articulated local to world");
+
+    UMaterialExpressionCustom* PositionCustom = nullptr;
+    UMaterialExpressionSetMaterialAttributes* NormalSet = nullptr;
+    int32 NormalInputIndex = INDEX_NONE;
+    const FGuid NormalAttributeId = FMaterialAttributeDefinitionMap::GetID(MP_Normal);
+
+    for (UMaterialExpression* Expression : Material->GetExpressions())
+    {
+        if (UMaterialExpressionCustom* Custom = Cast<UMaterialExpressionCustom>(Expression))
+        {
+            if (Custom->Code.Contains(PositionFunctionName))
+            {
+                PositionCustom = Custom;
+            }
+        }
+
+        UMaterialExpressionSetMaterialAttributes* SetAttributes =
+            Cast<UMaterialExpressionSetMaterialAttributes>(Expression);
+        if (!SetAttributes)
+        {
+            continue;
+        }
+
+        int32 AttributeIndex = INDEX_NONE;
+        if (SetAttributes->AttributeSetTypes.Find(NormalAttributeId, AttributeIndex))
+        {
+            const int32 CandidateInputIndex = AttributeIndex + 1;
+            if (SetAttributes->Inputs.IsValidIndex(CandidateInputIndex)
+                && SetAttributes->Inputs[CandidateInputIndex].IsConnected())
+            {
+                UMaterialExpression* CurrentNormalSource =
+                    SetAttributes->Inputs[CandidateInputIndex].Expression;
+                if (CurrentNormalSource
+                    && CurrentNormalSource->Desc.Equals(NormalOutputMarker, ESearchCase::CaseSensitive))
+                {
+                    Material->Modify();
+                    Material->bTangentSpaceNormal = false;
+                    Material->PostEditChange();
+                    Material->MarkPackageDirty();
+                    OutMessage = TEXT("The MBST articulated world-space normal path is already installed.");
+                    return true;
+                }
+
+                if (!NormalSet)
+                {
+                    NormalSet = SetAttributes;
+                    NormalInputIndex = CandidateInputIndex;
+                }
+            }
+        }
+    }
+
+    if (!PositionCustom)
+    {
+        OutMessage = TEXT("Could not find the MBST position-articulation Custom expression.");
+        return false;
+    }
+    if (!NormalSet || !NormalSet->Inputs.IsValidIndex(NormalInputIndex))
+    {
+        OutMessage = TEXT("Could not find a connected Normal attribute in the material graph.");
+        return false;
+    }
+    if (!Material->bTangentSpaceNormal)
+    {
+        OutMessage = TEXT("The material already expects world-space normals, but no MBST normal path was found.");
+        return false;
+    }
+
+    const FCustomInput* VertexMaskInput = PositionCustom->Inputs.FindByPredicate([](const FCustomInput& Input)
+    {
+        return Input.InputName == TEXT("VertexMask");
+    });
+    const FCustomInput* PackedHalvesInput = PositionCustom->Inputs.FindByPredicate([](const FCustomInput& Input)
+    {
+        return Input.InputName == TEXT("PackedHalves");
+    });
+    const FCustomInput* TurretAxisInput = PositionCustom->Inputs.FindByPredicate([](const FCustomInput& Input)
+    {
+        return Input.InputName == TEXT("TurretAxisObject");
+    });
+    const FCustomInput* BarrelAxisInput = PositionCustom->Inputs.FindByPredicate([](const FCustomInput& Input)
+    {
+        return Input.InputName == TEXT("BarrelAxisObject");
+    });
+    if (!VertexMaskInput || !VertexMaskInput->Input.IsConnected()
+        || !PackedHalvesInput || !PackedHalvesInput->Input.IsConnected()
+        || !TurretAxisInput || !TurretAxisInput->Input.IsConnected()
+        || !BarrelAxisInput || !BarrelAxisInput->Input.IsConnected())
+    {
+        OutMessage = TEXT("The MBST position Custom expression is missing a required mask, packed-state or axis input.");
+        return false;
+    }
+
+    const FExpressionInput OriginalNormalInput = NormalSet->Inputs[NormalInputIndex];
+    UMaterialExpressionTransform* TangentToLocal = Cast<UMaterialExpressionTransform>(
+        UMaterialEditingLibrary::CreateMaterialExpression(
+            Material,
+            UMaterialExpressionTransform::StaticClass(),
+            NormalSet->MaterialExpressionEditorX - 900,
+            NormalSet->MaterialExpressionEditorY - 350));
+    UMaterialExpressionCustom* NormalCustom = Cast<UMaterialExpressionCustom>(
+        UMaterialEditingLibrary::CreateMaterialExpression(
+            Material,
+            UMaterialExpressionCustom::StaticClass(),
+            NormalSet->MaterialExpressionEditorX - 600,
+            NormalSet->MaterialExpressionEditorY - 350));
+    UMaterialExpressionTransform* LocalToWorld = Cast<UMaterialExpressionTransform>(
+        UMaterialEditingLibrary::CreateMaterialExpression(
+            Material,
+            UMaterialExpressionTransform::StaticClass(),
+            NormalSet->MaterialExpressionEditorX - 300,
+            NormalSet->MaterialExpressionEditorY - 350));
+
+    if (!TangentToLocal || !NormalCustom || !LocalToWorld)
+    {
+        if (LocalToWorld)
+        {
+            UMaterialEditingLibrary::DeleteMaterialExpression(Material, LocalToWorld);
+        }
+        if (NormalCustom)
+        {
+            UMaterialEditingLibrary::DeleteMaterialExpression(Material, NormalCustom);
+        }
+        if (TangentToLocal)
+        {
+            UMaterialEditingLibrary::DeleteMaterialExpression(Material, TangentToLocal);
+        }
+        OutMessage = TEXT("Could not create the MBST normal-articulation material expressions.");
+        return false;
+    }
+
+    TangentToLocal->Modify();
+    TangentToLocal->TransformSourceType = TRANSFORMSOURCE_Tangent;
+    TangentToLocal->TransformType = TRANSFORM_Local;
+    TangentToLocal->Desc = TEXT("MBST normal: tangent to local before articulation");
+    TangentToLocal->Input = OriginalNormalInput;
+
+    NormalCustom->Modify();
+    const TArray<FString> NormalCodeLines = {
+        TEXT("uint Packed = (uint(round(PackedHalves.x)) & 65535u) | ((uint(round(PackedHalves.y)) & 65535u) << 16u);"),
+        TEXT("if (Packed == 0u) Packed = 0x08080000u;"),
+        TEXT("int VisualStyle;"),
+        TEXT("float4 YawPitchSinCos;"),
+        TEXT("float RecoilNormalized;"),
+        TEXT("MBST_DecodePackedStateSinCos((int)Packed, VisualStyle, YawPitchSinCos, RecoilNormalized);"),
+        TEXT("float4 ArticulationMask = float4(VertexMask.rgb, VertexMask.g);"),
+        TEXT("return MBST_ArticulateNormalObjectSpace(NormalObject, ArticulationMask, TurretAxisObject, BarrelAxisObject, YawPitchSinCos);")
+    };
+    NormalCustom->Code = FString::Join(NormalCodeLines, TEXT("\n"));
+    NormalCustom->OutputType = CMOT_Float3;
+    NormalCustom->Description = TEXT("MBST single-turret articulated normal; preserves the source normal map");
+    NormalCustom->Desc = TEXT("MBST rotate source normal with turret/barrel");
+    NormalCustom->Inputs.Reset();
+    NormalCustom->AdditionalOutputs.Reset();
+    NormalCustom->AdditionalDefines.Reset();
+    NormalCustom->IncludeFilePaths = { TEXT("/Plugin/MassBattleSingleTurret/Private/MBSTSingleTurret.ush") };
+    NormalCustom->ContainsClipInstruction = CMCI_No;
+
+    auto AddCustomInput = [NormalCustom](const FName Name, const FExpressionInput& Input)
+    {
+        FCustomInput& NewInput = NormalCustom->Inputs.AddDefaulted_GetRef();
+        NewInput.InputName = Name;
+        NewInput.Input = Input;
+    };
+
+    FExpressionInput NormalObjectInput;
+    NormalObjectInput.Connect(0, TangentToLocal);
+    AddCustomInput(TEXT("NormalObject"), NormalObjectInput);
+    AddCustomInput(TEXT("VertexMask"), VertexMaskInput->Input);
+    AddCustomInput(TEXT("PackedHalves"), PackedHalvesInput->Input);
+    AddCustomInput(TEXT("TurretAxisObject"), TurretAxisInput->Input);
+    AddCustomInput(TEXT("BarrelAxisObject"), BarrelAxisInput->Input);
+    NormalCustom->RebuildOutputs();
+
+    LocalToWorld->Modify();
+    LocalToWorld->TransformSourceType = TRANSFORMSOURCE_Local;
+    LocalToWorld->TransformType = TRANSFORM_World;
+    LocalToWorld->Desc = NormalOutputMarker;
+    LocalToWorld->Input.Connect(0, NormalCustom);
+
+    Material->Modify();
+    NormalSet->Modify();
+    const bool bWasTangentSpaceNormal = Material->bTangentSpaceNormal;
+    const bool bConnected = NormalSet->ConnectInputAttribute(MP_Normal, LocalToWorld, 0);
+    Material->bTangentSpaceNormal = false;
+    Material->PostEditChange();
+
+    TArray<FString> CompileErrors;
+    if (bConnected)
+    {
+        CompileErrors = UMaterialEditingLibrary::RecompileMaterial(Material);
+    }
+    if (!bConnected || !CompileErrors.IsEmpty())
+    {
+        NormalSet->Inputs[NormalInputIndex] = OriginalNormalInput;
+        Material->bTangentSpaceNormal = bWasTangentSpaceNormal;
+        UMaterialEditingLibrary::DeleteMaterialExpression(Material, LocalToWorld);
+        UMaterialEditingLibrary::DeleteMaterialExpression(Material, NormalCustom);
+        UMaterialEditingLibrary::DeleteMaterialExpression(Material, TangentToLocal);
+        Material->PostEditChange();
+        UMaterialEditingLibrary::RecompileMaterial(Material);
+
+        OutMessage = bConnected
+            ? FString::Printf(
+                TEXT("The MBST articulated-normal graph did not compile: %s"),
+                *FString::Join(CompileErrors, TEXT(" | ")))
+            : TEXT("Could not connect the articulated world-space normal to the material attributes.");
+        return false;
+    }
+
+    Material->MarkPackageDirty();
+    OutMessage = FString::Printf(
+        TEXT("Installed %s with tangent-to-local and local-to-world transforms; hull normals remain unchanged and articulated normals follow turret/barrel rotation."),
+        NormalFunctionName);
+    return true;
+}
+
 bool UMBSTSingleTurretEditorLibrary::ConfigureArticulationMaterialInstance(
     UMaterialInstanceConstant* MaterialInstance,
     UMBSTSingleTurretAsset* Layout,
@@ -1575,6 +1925,211 @@ bool UMBSTSingleTurretEditorLibrary::ConfigureAgentConfigSingleTurret(
     return true;
 }
 
+bool UMBSTSingleTurretEditorLibrary::ConfigureAgentConfigMobileFire(
+    UMassBattleAgentConfigDataAsset* AgentConfig,
+    UMBSTMobileFireProfile* Profile,
+    const FMBSTMobileFireState& InitialState,
+    const bool bEnable,
+    FString& OutMessage)
+{
+    OutMessage.Reset();
+    if (!IsValid(AgentConfig))
+    {
+        OutMessage = TEXT("AgentConfig is invalid.");
+        return false;
+    }
+    if (bEnable && !IsValid(Profile))
+    {
+        OutMessage = TEXT("A valid MobileFireProfile is required when enabling attack-move.");
+        return false;
+    }
+
+    int32 TurretStateCount = 0;
+    const FMBSTSingleTurretState* ExistingTurretState =
+        MBSTEditorPrivate::FindInstancedStruct<FMBSTSingleTurretState>(
+            AgentConfig->ExtraData.Fragments,
+            TurretStateCount);
+    const TOptional<FMBSTSingleTurretState> ExistingTurretStateCopy = ExistingTurretState
+        ? TOptional<FMBSTSingleTurretState>(*ExistingTurretState)
+        : TOptional<FMBSTSingleTurretState>();
+    if (bEnable && (TurretStateCount != 1 || !ExistingTurretState))
+    {
+        OutMessage = TEXT("Mobile fire requires the AgentConfig to contain exactly one single-turret state first.");
+        return false;
+    }
+
+    AgentConfig->Modify();
+    MBSTEditorPrivate::RemoveInstancedStructsOfType<FMBSTMobileFireTag>(AgentConfig->ExtraData.Tags);
+    MBSTEditorPrivate::RemoveInstancedStructsOfType<FMBSTMobileFireState>(AgentConfig->ExtraData.Fragments);
+    MBSTEditorPrivate::RemoveInstancedStructsOfType<FMBSTMobileFireShared>(AgentConfig->ExtraData.MutableSharedFragments);
+    // Clean misplaced copies as well so the template contract remains unambiguous.
+    MBSTEditorPrivate::RemoveInstancedStructsOfType<FMBSTMobileFireTag>(AgentConfig->ExtraData.Fragments);
+    MBSTEditorPrivate::RemoveInstancedStructsOfType<FMBSTMobileFireState>(AgentConfig->ExtraData.MutableSharedFragments);
+    MBSTEditorPrivate::RemoveInstancedStructsOfType<FMBSTMobileFireShared>(AgentConfig->ExtraData.ConstSharedFragments);
+
+    if (ExistingTurretStateCopy.IsSet())
+    {
+        FMBSTSingleTurretState UpdatedTurretState = ExistingTurretStateCopy.GetValue();
+        UpdatedTurretState.bExternalMotionDriver = bEnable;
+        MBSTEditorPrivate::UpsertInstancedStruct(
+            AgentConfig->ExtraData.Fragments,
+            UpdatedTurretState);
+    }
+
+    if (bEnable)
+    {
+        FMBSTMobileFireState SanitizedState = InitialState;
+        SanitizedState.Phase = SanitizedState.CooldownRemainingSeconds > 0.0f
+            ? EMBSTMobileFirePhase::Cooling
+            : EMBSTMobileFirePhase::Idle;
+        SanitizedState.PhaseTimeSeconds = 0.0f;
+        SanitizedState.CooldownRemainingSeconds = FMath::Max(
+            SanitizedState.CooldownRemainingSeconds,
+            0.0f);
+        SanitizedState.CurrentTarget.Reset();
+        SanitizedState.LastTargetWorldLocation = FVector::ZeroVector;
+        SanitizedState.LastYawErrorDegrees = 0.0f;
+        SanitizedState.LastPitchErrorDegrees = 0.0f;
+        SanitizedState.ShotSequence = 0;
+        SanitizedState.bMovementHoldRequested = false;
+        SanitizedState.bMovementGateAppliedThisStep = false;
+        SanitizedState.bSavedStopActiveMovement = false;
+
+        MBSTEditorPrivate::UpsertInstancedStruct(
+            AgentConfig->ExtraData.Tags,
+            FMBSTMobileFireTag());
+        MBSTEditorPrivate::UpsertInstancedStruct(
+            AgentConfig->ExtraData.Fragments,
+            SanitizedState);
+        MBSTEditorPrivate::UpsertInstancedStruct(
+            AgentConfig->ExtraData.MutableSharedFragments,
+            Profile->BuildSharedFragment());
+
+        if (Profile->bDisableBuiltInAttack)
+        {
+            AgentConfig->Attack.bEnable = false;
+        }
+        if (Profile->bDisableBuiltInChase)
+        {
+            AgentConfig->Chase.bEnable = false;
+        }
+        AgentConfig->bShowExtraData = true;
+        AgentConfig->bShowAttack = true;
+        AgentConfig->bShowChase = true;
+    }
+
+    AgentConfig->PostEditChange();
+    AgentConfig->MarkPackageDirty();
+
+    OutMessage = bEnable
+        ? FString::Printf(
+            TEXT("Embedded attack-move Tag/State/Shared profile '%s' in AgentConfig.ExtraData (policy: %s)."),
+            *Profile->GetPathName(),
+            *StaticEnum<EMBSTFireMobilityPolicy>()->GetDisplayNameTextByValue(
+                static_cast<int64>(Profile->MobilityPolicy)).ToString())
+        : TEXT("Removed the plugin-owned attack-move contract; the normal single-turret contract remains.");
+    return true;
+}
+
+FMBSTAssetValidationResult UMBSTSingleTurretEditorLibrary::ValidateAgentConfigMobileFire(
+    const UMassBattleAgentConfigDataAsset* AgentConfig,
+    const UMBSTMobileFireProfile* ExpectedProfile)
+{
+    FMBSTAssetValidationResult Result;
+    if (!IsValid(AgentConfig))
+    {
+        Result.Messages.Add(TEXT("AgentConfig is invalid."));
+        return Result;
+    }
+
+    int32 TagCount = 0;
+    int32 StateCount = 0;
+    int32 SharedCount = 0;
+    int32 TurretStateCount = 0;
+    MBSTEditorPrivate::FindInstancedStruct<FMBSTMobileFireTag>(
+        AgentConfig->ExtraData.Tags,
+        TagCount);
+    const FMBSTMobileFireState* State =
+        MBSTEditorPrivate::FindInstancedStruct<FMBSTMobileFireState>(
+            AgentConfig->ExtraData.Fragments,
+            StateCount);
+    const FMBSTMobileFireShared* Shared =
+        MBSTEditorPrivate::FindInstancedStruct<FMBSTMobileFireShared>(
+            AgentConfig->ExtraData.MutableSharedFragments,
+            SharedCount);
+    const FMBSTSingleTurretState* TurretState =
+        MBSTEditorPrivate::FindInstancedStruct<FMBSTSingleTurretState>(
+            AgentConfig->ExtraData.Fragments,
+            TurretStateCount);
+
+    if (TagCount != 1)
+    {
+        Result.Messages.Add(FString::Printf(
+            TEXT("Expected exactly one FMBSTMobileFireTag; found %d."),
+            TagCount));
+    }
+    if (StateCount != 1 || !State)
+    {
+        Result.Messages.Add(FString::Printf(
+            TEXT("Expected exactly one FMBSTMobileFireState; found %d."),
+            StateCount));
+    }
+    if (SharedCount != 1 || !Shared || !IsValid(Shared->Profile))
+    {
+        Result.Messages.Add(FString::Printf(
+            TEXT("Expected exactly one mutable MobileFire shared profile; found %d."),
+            SharedCount));
+    }
+    if (Shared && ExpectedProfile && Shared->Profile != ExpectedProfile)
+    {
+        Result.Messages.Add(FString::Printf(
+            TEXT("Mobile-fire profile mismatch: expected '%s', found '%s'."),
+            *ExpectedProfile->GetPathName(),
+            Shared->Profile ? *Shared->Profile->GetPathName() : TEXT("None")));
+    }
+    if (TurretStateCount != 1 || !TurretState || !TurretState->bExternalMotionDriver)
+    {
+        Result.Messages.Add(TEXT("The single-turret state is not delegated to the mobile-fire motion driver."));
+    }
+    if (Shared && Shared->bSpawnMassBattleProjectile && !IsValid(Shared->ProjectileConfig))
+    {
+        Result.Messages.Add(TEXT("Projectile spawning is enabled, but ProjectileConfig is empty."));
+    }
+    if (Shared && IsValid(Shared->Profile))
+    {
+        if (Shared->Profile->bDisableBuiltInAttack && AgentConfig->Attack.bEnable)
+        {
+            Result.Messages.Add(TEXT("The profile requests built-in attack suppression, but AgentConfig.Attack is still enabled."));
+        }
+        if (Shared->Profile->bDisableBuiltInChase && AgentConfig->Chase.bEnable)
+        {
+            Result.Messages.Add(TEXT("The profile requests built-in chase suppression, but AgentConfig.Chase is still enabled."));
+        }
+    }
+
+    Result.bValid = TagCount == 1
+        && StateCount == 1
+        && State != nullptr
+        && SharedCount == 1
+        && Shared != nullptr
+        && IsValid(Shared->Profile)
+        && (!ExpectedProfile || Shared->Profile == ExpectedProfile)
+        && TurretStateCount == 1
+        && TurretState != nullptr
+        && TurretState->bExternalMotionDriver
+        && (!Shared->bSpawnMassBattleProjectile || IsValid(Shared->ProjectileConfig))
+        && (!Shared->Profile->bDisableBuiltInAttack || !AgentConfig->Attack.bEnable)
+        && (!Shared->Profile->bDisableBuiltInChase || !AgentConfig->Chase.bEnable);
+    if (Result.bValid)
+    {
+        Result.Messages.Add(FString::Printf(
+            TEXT("AgentConfig has a valid per-unit attack-move contract using policy '%s'."),
+            *StaticEnum<EMBSTFireMobilityPolicy>()->GetDisplayNameTextByValue(
+                static_cast<int64>(Shared->MobilityPolicy)).ToString()));
+    }
+    return Result;
+}
+
 FMBSTAssetValidationResult UMBSTSingleTurretEditorLibrary::ValidateAgentConfigSingleTurret(
     const UMassBattleAgentConfigDataAsset* AgentConfig,
     const UMBSTSingleTurretAsset* ExpectedLayout)
@@ -1644,6 +2199,8 @@ UMassBattleAgentConfigDataAsset* UMBSTSingleTurretEditorLibrary::CreateSingleTur
     const FString& PackagePath,
     const FString& AssetName,
     const FMBSTSingleTurretState& InitialState,
+    UMBSTMobileFireProfile* MobileFireProfile,
+    const FMBSTMobileFireState& InitialMobileFireState,
     FString& OutMessage)
 {
     OutMessage.Reset();
@@ -1693,12 +2250,26 @@ UMassBattleAgentConfigDataAsset* UMBSTSingleTurretEditorLibrary::CreateSingleTur
         return nullptr;
     }
 
+    FString MobileFireMessage;
+    if (!ConfigureAgentConfigMobileFire(
+        Result,
+        MobileFireProfile,
+        InitialMobileFireState,
+        IsValid(MobileFireProfile),
+        MobileFireMessage))
+    {
+        Result->ClearFlags(RF_Public | RF_Standalone);
+        OutMessage = MobileFireMessage;
+        return nullptr;
+    }
+
     Result->MarkPackageDirty();
     OutMessage = FString::Printf(
-        TEXT("Actor conversion created direct single-turret AgentConfig '%s'%s. %s"),
+        TEXT("Actor conversion created direct single-turret AgentConfig '%s'%s. %s %s"),
         *Result->GetPathName(),
         IsValid(OptionalTemplate) ? TEXT(" from the optional normal-unit template") : TEXT(" from MassBattle defaults"),
-        *ConfigureMessage);
+        *ConfigureMessage,
+        *MobileFireMessage);
     return Result;
 }
 

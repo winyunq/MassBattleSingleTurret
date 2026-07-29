@@ -1,135 +1,167 @@
-# MassBattle Single Turret
+# MassBattle Single Turret (单实体 VAT 炮塔插件)
 
-这是一个独立的 MassBattle 单炮塔单位插件。它把任意可解析的 Blueprint Actor 装配转换成一个直接可生成的 Mass 单位：
+`MassBattleSingleTurret` 是专为 Unreal Engine 5.8 + MassBattle 框架设计的独立插件。它能够将任意基于 Actor/Component 组件化装配的坦克或载具，转换为**单实体 (Single Mass Entity) + 单 Niagara 粒子 + 单合并 VAT 静态网格**的无 Actor 炮塔单位。
 
+---
+
+## 🌟 核心优势
+
+- **零 Actor / 零子 Agent 开销**：传统方式需要“车体 Entity + 炮塔子 Entity + 炮管子 Entity”或完整 Actor 绑定，本插件运行时仅需 **1 个 Mass Entity** 驱动。
+- **顶点色关节与 32位 状态压缩**：炮塔 Yaw 旋转、炮管 Pitch 俯仰与后坐力 Recoil 全部在 Niagara + 材质 VAT 阶段完成，通过两个 16-bit float 无损传输 32 位 PackedState。
+- **零开销过滤**：通过内嵌的 `FMBSTSingleTurretTag` 进行精确匹配，普通无炮塔单位完全不进入热路径处理。
+- **极致性能**：在 500 辆坦克移动追踪测试中，相比传统 Actor 组装（22.93 ms），单实体炮塔仅需 **6.95 ms**。
+
+---
+
+## 🎯 重点：怎么标记炮塔 (How to Mark Turrets)
+
+源 Actor 不需要继承专用的坦克基类，只需要通过组件或 Tag 标出**炮塔旋转轴、炮管俯仰轴与炮口位置**。标记仅用于编辑期/转换期，**不会保留在运行时 Entity 上**。
+
+### 方法一：添加 `UMBSTSingleTurretAuthoringComponent` 组件（推荐）
+
+在源 Actor 蓝图中添加 `UMBSTSingleTurretAuthoringComponent` 组件，并在 Details 面板中直接指定绑定的 SceneComponent：
+
+| 标记属性 | 类型 | 作用描述 |
+| :--- | :--- | :--- |
+| **TurretYawPivot** | `USceneComponent*` | **必填**。控制炮塔水平 Yaw 旋转的枢轴组件（0° ~ 360°）。 |
+| **BarrelPitchPivot** | `USceneComponent*` | **可选**。控制炮管垂直 Pitch 俯仰的枢轴组件（-90° ~ 90°）。若未指定，仍作为单 Yaw 轴炮塔。 |
+| **Muzzle** | `USceneComponent*` | **可选**。炮口枢轴/Socket 组件。用于 CPU 重建炮口世界坐标、发射子弹与开火特效。 |
+| **VATDriver** | `USkeletalMeshComponent*` | **可选**。若车体有骨骼动画（如履带/悬挂 VAT），在此指定动画驱动组件。 |
+
+---
+
+### 方法二：使用 Component Tag 标记（Tag Fallback）
+
+如果您不想或无法修改蓝图代码直接引用组件，可在对应的 `USceneComponent` 的 **Component Tags** 数组中添加以下预设 Tag：
+
+- `MBST_TurretYawPivot`：标记该组件为炮塔 Yaw 旋转轴。
+- `MBST_BarrelPitchPivot`：标记该组件为炮管 Pitch 俯仰轴。
+- `MBST_Muzzle`：标记该组件为炮口位置。
+- `MBST_VATDriver`：标记该组件为车体 VAT 驱动器。
+
+> **提示**：转换器识别到 Pivot 后，会自动将位于该 Pivot 子树下的所有 Mesh Component 划分到对应的部件组（Body / Turret / Barrel）。
+
+---
+
+### 转换时的顶点色自动编码约定
+
+转换器在生成合并 StaticMesh 时，会自动将各部件的关节控制掩码写入**顶点色 (VertexColor)** 中：
+
+| 部件 (Sub-mesh) | R (Yaw) | G (Pitch) | B (Body VAT) | A (Recoil) |
+| :--- | :---: | :---: | :---: | :---: |
+| **车体 (Body)** | `0` | `0` | `0` 或 `1` | `0` |
+| **炮塔 (Turret)** | `1` | `0` | `0` | `0` |
+| **炮管 (Barrel)** | `1` | `1` | `0` | `1` |
+
+---
+
+## 🚀 完整使用指南 (Step-by-Step Usage)
+
+### 第一步：标记源 Actor
+
+参照上方【怎么标记炮塔】小节，在源 Actor 中使用 `UMBSTSingleTurretAuthoringComponent` 或 `Component Tag` 完成标注。
+
+---
+
+### 第二步：执行 Actor 转换
+
+在编辑器蓝图或 C++ 中调用转换入口：
+`Convert Actor To Single Turret VAT`
+
+**转换流程图**：
 ```text
-1 个新 AgentConfig
-1 个 Mass Entity
-1 个 Niagara Particle
-1 个合并 StaticMesh
-0 个运行时 Actor/AuthoringComponent
-0 个 Host Entity
-0 个炮塔子 Agent
+读取 SourceActor 当前可见装配
+ └─► 根据 Authoring 标记划分 Body / Turret / Barrel
+      └─► 分组提取 Mesh 并生成包含顶点色掩码的合并 StaticMesh
+           └─► 生成 Pivot Sockets、Sockets 及 LayoutAsset
+                └─► 复制 AgentConfig 模板并注入 SingleTurret 契约
+                     └─► 自动配置 Renderer Class 与 Niagara 数据接口
 ```
 
-## 最重要的边界
+**生成的契约数据自动写入新 AgentConfig 的指定位置**：
+- `ExtraData.Tags` ◄─ `FMBSTSingleTurretTag`
+- `ExtraData.Fragments` ◄─ `FMBSTSingleTurretState`
+- `ExtraData.MutableSharedFragments` ◄─ `FMBSTSingleTurretShared` (包含 Layout 引用与旋转速度限制)
 
-炮塔数据只在调用本插件的 `Convert Actor To Single Turret VAT` 时写入。
+---
 
-转换器每次都新建一个 AgentConfig，并自动把以下契约写进新资产：
+### 第三步：运行时生成单位
 
-```text
-AgentConfig.ExtraData.Tags                  += FMBSTSingleTurretTag
-AgentConfig.ExtraData.Fragments             += FMBSTSingleTurretState
-AgentConfig.ExtraData.MutableSharedFragments += FMBSTSingleTurretShared(Layout)
+使用 MassBattle 标准的 **`Spawn by Config`** 蓝图节点或 C++ 接口，传入第二步生成的 `AgentConfig` 资产即可批量生成炮塔单位。
+
+- 生成的实体直接携带单实体炮塔 Tag 与 Fragment。
+- 零 Actor 依赖，场景中无需保留原 Actor 蓝图。
+
+---
+
+### 第四步：运行时瞄准与控制 API
+
+在游戏过程中，可通过 C++ / 蓝图 API 对指定 Mass 实体控制炮塔：
+
+```cpp
+// 1. 世界坐标瞄准：使炮塔和炮管指向目标世界位置
+Aim Turret At World Location(TargetLocation);
+
+// 2. 角度控制：直接指定目标 Yaw 与 Pitch 角度
+Set Turret Target Angles(TargetYaw, TargetPitch);
+
+// 3. 触发开火后坐力：触发炮管后坐力动画（自动按时间衰减）
+Trigger Turret Recoil();
+
+// 4. CPU 重建世界变换：实时计算炮塔、炮管与炮口的世界位置/朝向（供子弹/特效/音效使用）
+Get Single Turret Pose(OutTurretTransform, OutBarrelTransform, OutMuzzleTransform);
 ```
 
-`AgentConfigTemplate` 只是可选的普通单位模板，用来继承移动、战斗等配置；插件复制它，绝不原地修改。没有经过本插件 Actor→单位入口的普通 AgentConfig 不会得到炮塔 Tag/Fragment，也不会进入炮塔 Processor。
+---
 
-因此，用新 AgentConfig 走 MassBattle 原有的按 Config 生成流程时，生成出来的就是带炮塔功能的 Mass 实体，不需要生成后再挂 Actor Component，也不需要再迁移 Archetype。
+### 第五步：走 A 与移动开火策略配置 (`UMBSTMobileFireProfile`)
 
-## Actor 如何标记炮塔
+插件内置了完善的走 A（Attack-Move）与移动开火系统，通过在 `AgentConfig` 中关联 `UMBSTMobileFireProfile` 数据资产决定单位行为：
 
-在源 Actor Blueprint 上添加编辑期组件：
+| 移动策略 (MobilityPolicy) | 行军瞄准 | 射击时移动 | 典型适用单位 |
+| :--- | :--- | :--- | :--- |
+| **`StopTurnChassisAndFire`** | 车体转向 | 停车射击 | 无旋转炮塔坦克、突击炮、固定火炮 |
+| **`AimWhileMovingStopToFire`** | 炮塔跟踪 | 获得目标后临时制动，稳定后射击，随后继续移动 | 普通主战坦克、重型火炮 |
+| **`AimAndFireWhileMoving`** | 炮塔跟踪 | 保持行进速度，边走边开火 | 稳定炮塔现代坦克、步兵战车、轻型载具 |
 
-```text
-MBST Single Turret Authoring
-```
+- **普通 Move 命令 (`bMoveToLocked = true`)**：单位保持锁定移动，炮塔自动跟踪敌人；仅 `AimAndFireWhileMoving` 会自动开火。
+- **A / Attack-Move 命令 (`bMoveToLocked = false`)**：停车型策略通过临时 Movement Gate 制动并射击，射击完成后恢复原本目的地移动，**不偷换也不取消原 MoveTo 路径**。
 
-然后绑定任意现有 SceneComponent：
+---
 
-- `TurretYawPivot`：炮塔水平旋转节点，必需；
-- `BarrelPitchPivot`：炮管俯仰节点，可选；
-- `Muzzle`：炮口节点，可选；
-- `VATDriver`：车体 VAT 的 SkeletalMeshComponent，可选。
+## 🛠️ 示例关卡与测试
 
-也可以使用组件 Tag 作为后备标记：
+插件在 `/MassBattleSingleTurret/Demo/` 目录下提供了完整的验证关卡：
 
-```text
-MBST_TurretYaw
-MBST_BarrelPitch
-MBST_Muzzle
-MBST_VATDriver
-MBST_Ignore
-```
+1. **基础坦克示例**：`/MassBattleSingleTurret/Demo/Tank`
+   包含生成的 Mesh、Layout、AgentConfig、Renderer BP 及 Niagara 材质。
+2. **移动开火/走 A 演示**：`/MassBattleSingleTurret/Demo/MobileFire/Map_MBST_MobileFire`
+   可直观观察停车射击组（橙色曳光）与移动射击组（青色曳光）的移动与射击表现。
+3. **RTS 框选实战关卡**：`/MassBattleSingleTurret/Demo/RTS/Map_MBST_RTS_MobileFire`
+   支持框选单位、右键移动与 Attack-Move 规则验证。
+4. **性能基准测试关卡**：`/MassBattleSingleTurret/Demo/Benchmark/Map_MBST_NativeTrackingBenchmark`
 
-AuthoringComponent 只负责告诉转换器“哪里是炮塔”。它不会被带入 Mass 运行时；运行时能力来自新 AgentConfig 中的 Tag + Fragment + Shared Fragment。
-
-## 转换输出
-
-一次成功转换必定返回：
-
-```text
-ArticulatedMesh   合并网格，顶点色保存 Body/Turret/Barrel 掩码
-LayoutAsset       Pivot、轴、角度限制、速度、Muzzle 等共享布局
-AgentConfig       自动含炮塔运行时契约的新单位配置
-VATDataAsset      仅在启用 VAT 时生成
-```
-
-如果 AgentConfig 创建或注入失败，整个转换结果会失败，不会把“只有 Mesh、没有炮塔实体契约”的半成品报告为成功。
-
-## 已生成的坦克 Demo
-
-插件已经用 MassBattleFrame Demo 的 `BP_TankActor` 生成并接好完整资产链：
-
-```text
-/MassBattleSingleTurret/Demo/Tank/Tank_SingleTurret
-/MassBattleSingleTurret/Demo/Tank/Tank_SingleTurret_SingleTurret
-/MassBattleSingleTurret/Demo/Tank/Tank_SingleTurret_AgentConfig
-/MassBattleSingleTurret/Demo/Tank/Renderer_Tank_SingleTurret
-/MassBattleSingleTurret/Demo/Tank/NS_Tank_SingleTurret
-/MassBattleSingleTurret/Materials/M_MBST_VATSingleTurret
-```
-
-新 AgentConfig 已指向插件 Renderer；Renderer 已指向合并 Mesh 和插件 Niagara。源 `BP_TankActor` 与 MassBattleFrame 源码/资产均未修改。
-
-## 性能结论的准确说法
-
-这不是“炮塔计算完全零开销”。准确说法是：
-
-- 普通单位零炮塔开销：查询要求 `FMBSTSingleTurretTag`；
-- 炮塔单位没有 Actor、Host、父子实体和额外完整 Agent 的开销；
-- 每个炮塔实体仍有一个紧凑 State Fragment、一次固定长度 CPU 更新/打包，以及材质顶点关节计算；
-- 复用现有 `FStyleType.Index → User.StyleArray`，每实体额外渲染载荷只有一个已存在通道中的 32 位值。
-
-Demo 旧坦克有 4 个 `MassBattleAgentComponent`（Vehicle/Turret/MachineGun/Cannon），新坦克是 1 个 Mass 实体，结构上减少 75% 的实体数量；这不是 FPS 声明。可重复的微基准与正式场景对照方法见 [性能设计](Docs/04_Performance_ZH.md)。
-
-插件还包含两张互不混跑的 5000 对 5000 基准地图：
-
-```text
-/MassBattleSingleTurret/Demo/Benchmark/Map_MBST_Legacy_5000v5000
-/MassBattleSingleTurret/Demo/Benchmark/Map_MBST_SingleTurret_5000v5000
-```
-
-两边固定同一队形、相机、分辨率、20 秒墙钟采样和每帧炮塔更新；炮塔按 `±75° / 8 s` 强制往复。为避免死亡减员和武器/寻路掩盖结构差异，计时窗口关闭攻击、Trace、移动和调试，表现保持开启；视觉齐射只出现在预热截图中。当前机器的正式结果为插件 `P50 167.418 ms / P95 174.929 ms`，旧 Demo `P50 1250.564 ms / P95 1576.489 ms`。完整条件、命令和限制见性能文档。
-
-## 验证
-
-静态验证：
-
+可以通过 Powershell 自动化脚本运行回归测试：
 ```powershell
-python Tools/validate_plugin.py
-python Tools/check_massbattle_contract.py D:\UE5Project\Winyunq\Plugins\MassBattleFrame
+# 运行移动开火功能回归测试
+Tools/run_mobile_fire_functional.ps1 -Units 64
+
+# 运行 500 单位移动追踪性能基准
+Tools/run_native_tracking_benchmark.ps1 -Units 500
 ```
 
-编辑器自动化：
+---
 
-```text
-MassBattle.SingleTurret.Authoring.GenerateDemoTank
-MassBattle.SingleTurret.Authoring.ConfigureDemoNiagaraStyleArray
-MassBattle.SingleTurret.Performance.DemoTankStructure
-MassBattle.SingleTurret.Performance.PackingMicrobenchmark
-MassBattle.SingleTurret.Benchmark.CreateDemoMaps
-```
+## 📄 关联文档
 
-## 当前范围
+- [Actor 与单位转换机制](Docs/01_Actor_Conversion_ZH.md)
+- [Niagara 与材质解包说明](Docs/02_Niagara_Material_ZH.md)
+- [运行时流程与状态压缩](Docs/03_Runtime_ZH.md)
+- [性能对比与 Benchmark](Docs/04_Performance_ZH.md)
+- [移动开火与走 A 策略详述](Docs/06_MobileFire_ZH.md)
 
-支持一个 Yaw 炮塔、可选一个 Pitch 炮管和可选 Recoil。暂不支持第二个独立炮塔、运行时动态关节数组、GPU 碰撞或多炮塔增减。
+---
 
-## 文档
+## 📜 许可与贡献
 
-- [Actor 与单位转换](Docs/01_Actor_Conversion_ZH.md)
-- [Niagara 与材质接线](Docs/02_Niagara_Material_ZH.md)
-- [运行时流程](Docs/03_Runtime_ZH.md)
-- [性能设计与对照方法](Docs/04_Performance_ZH.md)
-- [排错清单](Docs/05_Troubleshooting_ZH.md)
+本插件作为 MassBattle 生态扩展模块发布。欢迎提交 Issue 与 Pull Request！

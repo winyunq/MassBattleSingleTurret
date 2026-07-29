@@ -1,8 +1,14 @@
 #include "MBSTSingleTurretBlueprintLibrary.h"
 
 #include "MBSTSingleTurretAsset.h"
+#include "MBSTMobileFireProfile.h"
+#include "MBSTMobileFireSubsystem.h"
+#include "Engine/World.h"
 #include "DataAssets/MassBattleAgentConfigDataAsset.h"
 #include "Fragments/StyleType.h"
+#include "Fragments/Attack.h"
+#include "Fragments/Chase.h"
+#include "Fragments/Move.h"
 #include "Fragments/Transform.h"
 #include "FuncLibs/MassBattleFuncLib.h"
 #include "MassAPISubsystem.h"
@@ -22,6 +28,67 @@ namespace MBSTBlueprintPrivate
             OutShared.PitchSpeedDegreesPerSecond = Layout->PitchSpeedDegreesPerSecond;
             OutShared.RecoilReturnSpeed = Layout->RecoilReturnSpeed;
         }
+    }
+
+
+    static void FillMobileFireShared(FMBSTMobileFireShared& OutShared, UMBSTMobileFireProfile* Profile)
+    {
+        OutShared = Profile ? Profile->BuildSharedFragment() : FMBSTMobileFireShared();
+    }
+
+    static FMBSTMobileFireState SanitizeInitialFireState(const FMBSTMobileFireState& InitialState)
+    {
+        FMBSTMobileFireState Result = InitialState;
+        Result.Phase = Result.CooldownRemainingSeconds > 0.0f
+            ? EMBSTMobileFirePhase::Cooling
+            : EMBSTMobileFirePhase::Idle;
+        Result.PhaseTimeSeconds = 0.0f;
+        Result.CooldownRemainingSeconds = FMath::Max(Result.CooldownRemainingSeconds, 0.0f);
+        Result.CurrentTarget.Reset();
+        Result.LastTargetWorldLocation = FVector::ZeroVector;
+        Result.LastYawErrorDegrees = 0.0f;
+        Result.LastPitchErrorDegrees = 0.0f;
+        Result.ShotSequence = 0;
+        Result.bMovementHoldRequested = false;
+        Result.bMovementGateAppliedThisStep = false;
+        Result.bSavedStopActiveMovement = false;
+        return Result;
+    }
+
+    static void ApplyCompatibilityOverrides(FMassEntityTemplateData& Template, const UMBSTMobileFireProfile& Profile)
+    {
+        if (Profile.bDisableBuiltInAttack)
+        {
+            if (FAttack* Attack = UMassAPISubsystem::GetFragmentPtr<FAttack>(Template))
+            {
+                Attack->bEnable = false;
+            }
+        }
+
+        if (Profile.bDisableBuiltInChase)
+        {
+            if (FChase* Chase = UMassAPISubsystem::GetFragmentPtr<FChase>(Template))
+            {
+                Chase->bEnable = false;
+            }
+        }
+    }
+
+    static bool ResolveMobileFireState(
+        const UObject* WorldContextObject,
+        const FEntityHandle& Agent,
+        UMassAPISubsystem*& OutMassAPI,
+        FMBSTMobileFireState*& OutState)
+    {
+        OutMassAPI = UMassAPISubsystem::GetPtr(WorldContextObject);
+        OutState = nullptr;
+        if (!OutMassAPI || !OutMassAPI->IsValid(Agent))
+        {
+            return false;
+        }
+
+        OutState = OutMassAPI->GetFragmentPtr<FMBSTMobileFireState>(Agent);
+        return OutState != nullptr;
     }
 
     static bool ResolveRuntimeData(
@@ -97,6 +164,227 @@ namespace MBSTBlueprintPrivate
             FVector(UniformScale));
         return true;
     }
+}
+
+FEntityTemplateData UMBSTSingleTurretBlueprintLibrary::MakeMobileFireSingleTurretTemplateFromAgentConfig(
+    const UObject* WorldContextObject,
+    const UMassBattleAgentConfigDataAsset* BaseAgentConfig,
+    UMBSTSingleTurretAsset* Layout,
+    const FMBSTSingleTurretState& InitialTurretState,
+    UMBSTMobileFireProfile* FireProfile,
+    const FMBSTMobileFireState& InitialFireState)
+{
+    const FEntityTemplateData TurretTemplate = MakeSingleTurretTemplateFromAgentConfig(
+        WorldContextObject,
+        BaseAgentConfig,
+        Layout,
+        InitialTurretState);
+
+    return AddMobileFireToTemplate(
+        WorldContextObject,
+        TurretTemplate,
+        FireProfile,
+        InitialFireState);
+}
+
+FEntityTemplateData UMBSTSingleTurretBlueprintLibrary::AddMobileFireToTemplate(
+    const UObject* WorldContextObject,
+    const FEntityTemplateData& BaseTemplate,
+    UMBSTMobileFireProfile* FireProfile,
+    const FMBSTMobileFireState& InitialFireState)
+{
+    UMassAPISubsystem* MassAPI = UMassAPISubsystem::GetPtr(WorldContextObject);
+    if (!MassAPI
+        || !MassAPI->GetEntityManager()
+        || !BaseTemplate.IsValid()
+        || !BaseTemplate.Get()
+        || !IsValid(FireProfile))
+    {
+        return FEntityTemplateData();
+    }
+
+    FMassEntityTemplateData ClonedTemplate = UMassAPISubsystem::CloneTemplate(*BaseTemplate.Get());
+    FMBSTSingleTurretState* TurretState = UMassAPISubsystem::GetFragmentPtr<FMBSTSingleTurretState>(ClonedTemplate);
+    if (!TurretState || !UMassAPISubsystem::HasSharedFragment<FMBSTSingleTurretShared>(ClonedTemplate))
+    {
+        return FEntityTemplateData();
+    }
+
+    TurretState->bExternalMotionDriver = true;
+    UMassAPISubsystem::AddTag<FMBSTMobileFireTag>(ClonedTemplate);
+    const FMBSTMobileFireState SanitizedState =
+        MBSTBlueprintPrivate::SanitizeInitialFireState(InitialFireState);
+    UMassAPISubsystem::SetFragment<FMBSTMobileFireState>(ClonedTemplate, SanitizedState);
+    MBSTBlueprintPrivate::ApplyCompatibilityOverrides(ClonedTemplate, *FireProfile);
+
+    FMBSTMobileFireShared Shared;
+    MBSTBlueprintPrivate::FillMobileFireShared(Shared, FireProfile);
+    UMassAPISubsystem::SetSharedFragment<FMBSTMobileFireShared>(
+        ClonedTemplate,
+        Shared,
+        *MassAPI->GetEntityManager());
+
+    return FEntityTemplateData(MakeShared<FMassEntityTemplateData>(MoveTemp(ClonedTemplate)));
+}
+
+bool UMBSTSingleTurretBlueprintLibrary::AddMobileFireToExistingAgent(
+    const UObject* WorldContextObject,
+    const FEntityHandle& Agent,
+    UMBSTMobileFireProfile* FireProfile,
+    const FMBSTMobileFireState& InitialFireState)
+{
+    UMassAPISubsystem* MassAPI = UMassAPISubsystem::GetPtr(WorldContextObject);
+    if (!MassAPI || !MassAPI->IsValid(Agent) || !IsValid(FireProfile))
+    {
+        return false;
+    }
+
+    FMBSTSingleTurretState* TurretState = MassAPI->GetFragmentPtr<FMBSTSingleTurretState>(Agent);
+    if (!TurretState || !MassAPI->HasSharedFragment<FMBSTSingleTurretShared>(Agent))
+    {
+        return false;
+    }
+    TurretState->bExternalMotionDriver = true;
+
+    const FMBSTMobileFireState SanitizedState =
+        MBSTBlueprintPrivate::SanitizeInitialFireState(InitialFireState);
+    if (FMBSTMobileFireState* ExistingState = MassAPI->GetFragmentPtr<FMBSTMobileFireState>(Agent))
+    {
+        *ExistingState = SanitizedState;
+    }
+    else
+    {
+        MassAPI->AddFragment<FMBSTMobileFireState>(Agent, SanitizedState);
+    }
+
+    if (!MassAPI->HasTag<FMBSTMobileFireTag>(Agent))
+    {
+        MassAPI->AddTag<FMBSTMobileFireTag>(Agent);
+    }
+
+    if (FireProfile->bDisableBuiltInAttack)
+    {
+        if (FAttack* Attack = MassAPI->GetFragmentPtr<FAttack>(Agent))
+        {
+            Attack->bEnable = false;
+        }
+    }
+    if (FireProfile->bDisableBuiltInChase)
+    {
+        if (FChase* Chase = MassAPI->GetFragmentPtr<FChase>(Agent))
+        {
+            Chase->bEnable = false;
+        }
+    }
+
+    if (MassAPI->HasSharedFragment<FMBSTMobileFireShared>(Agent))
+    {
+        MassAPI->RemoveSharedFragment<FMBSTMobileFireShared>(Agent);
+    }
+
+    FMBSTMobileFireShared Shared;
+    MBSTBlueprintPrivate::FillMobileFireShared(Shared, FireProfile);
+    return MassAPI->AddSharedFragment<FMBSTMobileFireShared>(Agent, Shared);
+}
+
+bool UMBSTSingleTurretBlueprintLibrary::SetMobileFireEnabled(
+    const UObject* WorldContextObject,
+    const FEntityHandle& Agent,
+    const bool bEnabled)
+{
+    UMassAPISubsystem* MassAPI = nullptr;
+    FMBSTMobileFireState* State = nullptr;
+    if (!MBSTBlueprintPrivate::ResolveMobileFireState(WorldContextObject, Agent, MassAPI, State))
+    {
+        return false;
+    }
+
+    State->bEnabled = bEnabled;
+    if (!bEnabled)
+    {
+        State->bMovementHoldRequested = false;
+        State->Phase = EMBSTMobileFirePhase::Idle;
+        State->PhaseTimeSeconds = 0.0f;
+    }
+    return true;
+}
+
+bool UMBSTSingleTurretBlueprintLibrary::SetMobileFireTargetEntity(
+    const UObject* WorldContextObject,
+    const FEntityHandle& Agent,
+    const FEntityHandle& TargetEntity)
+{
+    UMassAPISubsystem* MassAPI = nullptr;
+    FMBSTMobileFireState* State = nullptr;
+    if (!MBSTBlueprintPrivate::ResolveMobileFireState(WorldContextObject, Agent, MassAPI, State))
+    {
+        return false;
+    }
+
+    State->TargetOverrideMode = EMBSTTargetOverrideMode::Entity;
+    State->OverrideTargetEntity = TargetEntity;
+    return true;
+}
+
+bool UMBSTSingleTurretBlueprintLibrary::SetMobileFireTargetWorldLocation(
+    const UObject* WorldContextObject,
+    const FEntityHandle& Agent,
+    const FVector& TargetWorldLocation)
+{
+    UMassAPISubsystem* MassAPI = nullptr;
+    FMBSTMobileFireState* State = nullptr;
+    if (!MBSTBlueprintPrivate::ResolveMobileFireState(WorldContextObject, Agent, MassAPI, State))
+    {
+        return false;
+    }
+
+    State->TargetOverrideMode = EMBSTTargetOverrideMode::WorldLocation;
+    State->OverrideTargetWorldLocation = TargetWorldLocation;
+    State->OverrideTargetEntity.Reset();
+    return true;
+}
+
+bool UMBSTSingleTurretBlueprintLibrary::ClearMobileFireTargetOverride(
+    const UObject* WorldContextObject,
+    const FEntityHandle& Agent)
+{
+    UMassAPISubsystem* MassAPI = nullptr;
+    FMBSTMobileFireState* State = nullptr;
+    if (!MBSTBlueprintPrivate::ResolveMobileFireState(WorldContextObject, Agent, MassAPI, State))
+    {
+        return false;
+    }
+
+    State->TargetOverrideMode = EMBSTTargetOverrideMode::None;
+    State->OverrideTargetEntity.Reset();
+    State->OverrideTargetWorldLocation = FVector::ZeroVector;
+    return true;
+}
+
+bool UMBSTSingleTurretBlueprintLibrary::GetMobileFireState(
+    const UObject* WorldContextObject,
+    const FEntityHandle& Agent,
+    FMBSTMobileFireState& OutState)
+{
+    UMassAPISubsystem* MassAPI = nullptr;
+    FMBSTMobileFireState* State = nullptr;
+    if (!MBSTBlueprintPrivate::ResolveMobileFireState(WorldContextObject, Agent, MassAPI, State))
+    {
+        return false;
+    }
+
+    OutState = *State;
+    return true;
+}
+
+TArray<FMBSTFireRequest> UMBSTSingleTurretBlueprintLibrary::DrainMobileFireRequests(
+    const UObject* WorldContextObject)
+{
+    UWorld* World = WorldContextObject ? WorldContextObject->GetWorld() : nullptr;
+    UMBSTMobileFireSubsystem* FireSubsystem = World
+        ? World->GetSubsystem<UMBSTMobileFireSubsystem>()
+        : nullptr;
+    return FireSubsystem ? FireSubsystem->DrainFireRequests() : TArray<FMBSTFireRequest>();
 }
 
 FEntityTemplateData UMBSTSingleTurretBlueprintLibrary::MakeSingleTurretTemplateFromAgentConfig(

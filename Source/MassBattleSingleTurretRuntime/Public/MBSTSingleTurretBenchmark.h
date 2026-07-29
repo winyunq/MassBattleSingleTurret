@@ -4,18 +4,27 @@
 #include "GameFramework/Actor.h"
 #include "GameFramework/GameModeBase.h"
 #include "GameFramework/HUD.h"
+#include "MassAPIStructs.h"
 #include "MassEntityQuery.h"
 #include "MassProcessor.h"
 #include "Fragments/MassBattleBaseStruct.h"
 #include "MBSTSingleTurretBenchmark.generated.h"
 
 class ACameraActor;
+class AStaticMeshActor;
 class UMassBattleAgentConfigDataAsset;
 
+/** Three separately launched native benchmark architectures. */
 UENUM(BlueprintType)
 enum class EMBSTBenchmarkScenario : uint8
 {
+    /** The untouched MassBattleFrame BP_TankActor compound architecture. */
     LegacyCompound,
+
+    /** One ordinary Mass entity; the complete tank rotates to track the target. */
+    MassBaseline,
+
+    /** One Mass entity whose GPU-rendered turret tracks independently. */
     SingleTurret
 };
 
@@ -30,9 +39,16 @@ enum class EMBSTBenchmarkPhase : uint8
     Failed
 };
 
-/** Benchmark-only tag for the legacy turret entity inside BP_TankActor. */
+/** Benchmark-only tag for the turret entity inside the original BP_TankActor. */
 USTRUCT()
 struct MASSBATTLESINGLETURRETRUNTIME_API FMBSTBenchmarkLegacyTurretTag : public FA_MassBattleBaseTag
+{
+    GENERATED_BODY()
+};
+
+/** Benchmark-only tag for an ordinary one-entity Mass tank. */
+USTRUCT()
+struct MASSBATTLESINGLETURRETRUNTIME_API FMBSTBenchmarkMassBaselineTag : public FA_MassBattleBaseTag
 {
     GENERATED_BODY()
 };
@@ -44,7 +60,11 @@ struct MASSBATTLESINGLETURRETRUNTIME_API FMBSTBenchmarkSingleTurretTag : public 
     GENERATED_BODY()
 };
 
-/** Applies the identical sinusoidal engagement sweep to both benchmark architectures. */
+/**
+ * Native Mass processor that forces every tested unit to continuously track the
+ * same deterministic orbiting target.  It contains no Blueprint Tick or Actor
+ * loop, and it only matches entities carrying one of the benchmark tags.
+ */
 UCLASS()
 class MASSBATTLESINGLETURRETRUNTIME_API UMBSTSingleTurretBenchmarkDriveProcessor : public UMassProcessor
 {
@@ -59,10 +79,11 @@ protected:
 
 private:
     FMassEntityQuery LegacyQuery;
+    FMassEntityQuery MassBaselineQuery;
     FMassEntityQuery SingleTurretQuery;
 };
 
-/** Runtime controller used by the two generated 5,000-vs-5,000 demo maps. */
+/** Controller for the adjustable native moving-target benchmark demo. */
 UCLASS(BlueprintType)
 class MASSBATTLESINGLETURRETRUNTIME_API AMBSTSingleTurretBenchmarkActor : public AActor
 {
@@ -74,17 +95,52 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MassBattle|Single Turret|Benchmark")
     EMBSTBenchmarkScenario Scenario = EMBSTBenchmarkScenario::SingleTurret;
 
+    /** Number of tanks in the one tested group. CLI: -MBSTUnits=500. */
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MassBattle|Single Turret|Benchmark", meta = (ClampMin = "1"))
-    int32 TanksPerSide = 5000;
+    int32 UnitCount = 500;
 
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MassBattle|Single Turret|Benchmark", meta = (ClampMin = "0.0"))
-    float WarmupSeconds = 10.0f;
+    float WarmupSeconds = 8.0f;
 
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MassBattle|Single Turret|Benchmark", meta = (ClampMin = "1.0"))
-    float SampleSeconds = 20.0f;
+    float SampleSeconds = 15.0f;
 
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MassBattle|Single Turret|Benchmark", meta = (ClampMin = "1"))
-    int32 LegacyActorsPerFrame = 250;
+    int32 LegacyActorsPerFrame = 100;
+
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MassBattle|Single Turret|Benchmark|Moving Target", meta = (ClampMin = "100.0"))
+    float TargetOrbitRadius = 10000.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MassBattle|Single Turret|Benchmark|Moving Target", meta = (ClampMin = "1.0"))
+    float TargetOrbitPeriodSeconds = 12.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MassBattle|Single Turret|Benchmark|Moving Target")
+    float TargetHeight = 300.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MassBattle|Single Turret|Benchmark|Moving Target", meta = (ClampMin = "1.0"))
+    float TargetHealth = 1000000000.0f;
+
+    /** Optional deterministic target bearing used by yaw/handedness proofs. CLI: -MBSTFixedTargetBearing=90. */
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MassBattle|Single Turret|Benchmark|Moving Target")
+    bool bUseFixedTargetBearing = false;
+
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MassBattle|Single Turret|Benchmark|Moving Target")
+    float FixedTargetBearingDegrees = 90.0f;
+
+    /** Uses a straight-down close camera so barrel/target alignment is unambiguous. CLI: -MBSTTopDownAimProof. */
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MassBattle|Single Turret|Benchmark|Moving Target")
+    bool bTopDownAimProof = false;
+
+    /** Leaves the PlayerController on its SpectatorPawn instead of forcing benchmark cameras. CLI: -MBSTFreeObserve. */
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MassBattle|Single Turret|Benchmark|Observation")
+    bool bFreeObservation = false;
+
+    /** Editor Play sessions automatically become freely observable; standalone benchmark processes remain deterministic. */
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MassBattle|Single Turret|Benchmark|Observation")
+    bool bAutoFreeObservationInPIE = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MassBattle|Single Turret|Benchmark|Observation", meta = (ClampMin = "100.0"))
+    float FreeObservationSpeed = 6000.0f;
 
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "MassBattle|Single Turret|Benchmark")
     EMBSTBenchmarkPhase Phase = EMBSTBenchmarkPhase::Waiting;
@@ -110,8 +166,21 @@ public:
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "MassBattle|Single Turret|Benchmark")
     float MaximumFrameMilliseconds = 0.0f;
 
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "MassBattle|Single Turret|Benchmark")
+    float AverageGameThreadMilliseconds = 0.0f;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "MassBattle|Single Turret|Benchmark")
+    float AverageRenderThreadMilliseconds = 0.0f;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "MassBattle|Single Turret|Benchmark")
+    float AverageGPUMilliseconds = 0.0f;
+
+    /** Kept for old demo/HUD callers; now returns the target's orbit bearing. */
     UFUNCTION(BlueprintPure, Category = "MassBattle|Single Turret|Benchmark")
     float GetLiveSweepYawDegrees() const;
+
+    UFUNCTION(BlueprintPure, Category = "MassBattle|Single Turret|Benchmark")
+    FVector GetMovingTargetLocation() const;
 
     UFUNCTION(BlueprintPure, Category = "MassBattle|Single Turret|Benchmark")
     FString GetScenarioLabel() const;
@@ -130,23 +199,26 @@ private:
     void ApplyCommandLineOverrides();
     void CreateBenchmarkEnvironment();
     bool LoadScenarioAssets();
+    bool SpawnMovingTarget();
+    void UpdateMovingTarget();
     void BeginSpawning();
-    void SpawnSingleTurretForces();
+    void SpawnMassScenario(bool bSingleTurret);
     void SpawnLegacyBatch();
-    bool SpawnOneLegacyTank(int32 SideIndex, int32 SideTankIndex);
-    void ConfigureControlledEntity(const struct FEntityHandle& EntityHandle, bool bTurretEntity, bool bSingleTurretEntity, int32 ForcedTeamIndex = -1);
+    bool SpawnOneLegacyTank(int32 TankIndex);
+    void ConfigureControlledEntity(const FEntityHandle& EntityHandle, bool bLegacyTurret, bool bMassBaseline, bool bSingleTurret, bool bEnableVisualization, int32 ForcedTeamIndex = -1);
+    void ConfigureMovingTargetEntity(const FEntityHandle& EntityHandle);
     void EnterWarmup();
     void EnterSampling();
     void FinishSampling();
     void WriteResultJson();
-    void CaptureScreenshot(const FString& Suffix, bool bCloseView, bool bVisualSalvo);
+    void CaptureScreenshot(const FString& Suffix, bool bCloseView, bool bVisualAimLines);
     void FlushPendingScreenshot();
-    void DrawVisualSalvo() const;
+    void DrawVisualAimProof() const;
     void SetCloseCamera(bool bCloseView) const;
-    FVector GetFormationPosition(int32 SideIndex, int32 SideTankIndex) const;
-    FRotator GetFormationRotation(int32 SideIndex) const;
+    FVector GetFormationPosition(int32 TankIndex) const;
     float GetPercentile(const TArray<float>& SortedValues, float Alpha) const;
     FString GetOutputDirectory() const;
+    FString GetScenarioToken() const;
 
     UPROPERTY(Transient)
     TObjectPtr<UClass> LegacyTankClass = nullptr;
@@ -160,7 +232,14 @@ private:
     UPROPERTY(Transient)
     TObjectPtr<ACameraActor> CloseCamera = nullptr;
 
+    UPROPERTY(Transient)
+    TObjectPtr<AStaticMeshActor> MovingTargetVisual = nullptr;
+
+    FEntityHandle MovingTargetEntity;
     TArray<float> FrameTimeSamplesMilliseconds;
+    TArray<float> GameThreadSamplesMilliseconds;
+    TArray<float> RenderThreadSamplesMilliseconds;
+    TArray<float> GPUSamplesMilliseconds;
     FString ResultFilePath;
     FString OutputDirectoryOverride;
     FString PendingScreenshotFilename;
@@ -168,22 +247,19 @@ private:
     float PhaseElapsedSeconds = 0.0f;
     float CompletionElapsedSeconds = 0.0f;
     float FormationSpacing = 500.0f;
-    float ArmyCenterX = 15000.0f;
-    int32 FormationDepth = 50;
-    int32 FormationWidth = 100;
-    int32 SpawnedSideCounts[2] = { 0, 0 };
+    int32 FormationDepth = 1;
+    int32 FormationWidth = 1;
     bool bSkipScreenshots = false;
     bool bDoNotExit = false;
     bool bWideCaptured = false;
-    bool bYawPlusCaptured = false;
-    bool bYawMinusCaptured = false;
+    bool bCloseCaptured = false;
     bool bResultCaptured = false;
-    bool bPendingVisualSalvo = false;
+    bool bPendingVisualAimProof = false;
     bool bRenderDiagnosticsLogged = false;
     int32 PendingScreenshotFrames = 0;
 };
 
-/** Compact proof overlay embedded in every benchmark screenshot. */
+/** Compact proof overlay embedded in benchmark screenshots. */
 UCLASS()
 class MASSBATTLESINGLETURRETRUNTIME_API AMBSTSingleTurretBenchmarkHUD : public AHUD
 {

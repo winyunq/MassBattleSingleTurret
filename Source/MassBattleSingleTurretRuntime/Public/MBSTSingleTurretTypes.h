@@ -46,6 +46,14 @@ struct MASSBATTLESINGLETURRETRUNTIME_API FMBSTSingleTurretState : public FA_Mass
 
     UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "MassBattle|Single Turret")
     bool bArticulationEnabled = true;
+
+    /**
+     * When true, another plugin processor owns CurrentYaw/CurrentPitch/Recoil updates.
+     * The FrameEnd pack processor then performs serialization only, keeping CPU muzzle
+     * state and the GPU pose on the same simulation sample.
+     */
+    UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "MassBattle|Single Turret")
+    bool bExternalMotionDriver = false;
 };
 
 /** Shared layout data; pivot/axis metadata is not duplicated per entity. */

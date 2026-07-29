@@ -48,41 +48,55 @@ void UMBSTSingleTurretPackProcessor::Execute(FMassEntityManager& EntityManager, 
         {
             FMBSTSingleTurretState& State = States[EntityIndex];
 
-            const float TargetYaw = FMath::Clamp(
-                FMath::UnwindDegrees(State.TargetYawDegrees),
-                MinYaw,
-                MaxYaw);
-            const float TargetPitch = Shared.bHasBarrelPitch
-                ? FMath::Clamp(State.TargetPitchDegrees, MinPitch, MaxPitch)
-                : 0.0f;
-
-            if (!State.bArticulationEnabled)
+            if (!State.bExternalMotionDriver)
             {
-                State.CurrentYawDegrees = 0.0f;
-                State.CurrentPitchDegrees = 0.0f;
-                State.RecoilNormalized = 0.0f;
-            }
-            else if (State.bInterpolate && DeltaSeconds > 0.0f)
-            {
-                State.CurrentYawDegrees = Shared.YawSpeedDegreesPerSecond > 0.0f
-                    ? FMath::FixedTurn(
-                        State.CurrentYawDegrees,
-                        TargetYaw,
-                        Shared.YawSpeedDegreesPerSecond * DeltaSeconds)
-                    : TargetYaw;
+                const float TargetYaw = FMath::Clamp(
+                    FMath::UnwindDegrees(State.TargetYawDegrees),
+                    MinYaw,
+                    MaxYaw);
+                const float TargetPitch = Shared.bHasBarrelPitch
+                    ? FMath::Clamp(State.TargetPitchDegrees, MinPitch, MaxPitch)
+                    : 0.0f;
 
-                State.CurrentPitchDegrees = Shared.PitchSpeedDegreesPerSecond > 0.0f
-                    ? FMath::FInterpConstantTo(
-                        State.CurrentPitchDegrees,
-                        TargetPitch,
+                if (!State.bArticulationEnabled)
+                {
+                    State.CurrentYawDegrees = 0.0f;
+                    State.CurrentPitchDegrees = 0.0f;
+                    State.RecoilNormalized = 0.0f;
+                }
+                else if (State.bInterpolate && DeltaSeconds > 0.0f)
+                {
+                    State.CurrentYawDegrees = Shared.YawSpeedDegreesPerSecond > 0.0f
+                        ? FMath::FixedTurn(
+                            State.CurrentYawDegrees,
+                            TargetYaw,
+                            Shared.YawSpeedDegreesPerSecond * DeltaSeconds)
+                        : TargetYaw;
+
+                    State.CurrentPitchDegrees = Shared.PitchSpeedDegreesPerSecond > 0.0f
+                        ? FMath::FInterpConstantTo(
+                            State.CurrentPitchDegrees,
+                            TargetPitch,
+                            DeltaSeconds,
+                            Shared.PitchSpeedDegreesPerSecond)
+                        : TargetPitch;
+                }
+                else
+                {
+                    State.CurrentYawDegrees = TargetYaw;
+                    State.CurrentPitchDegrees = TargetPitch;
+                }
+
+                if (State.RecoilNormalized > 0.0f
+                    && Shared.RecoilReturnSpeed > 0.0f
+                    && DeltaSeconds > 0.0f)
+                {
+                    State.RecoilNormalized = FMath::FInterpConstantTo(
+                        State.RecoilNormalized,
+                        0.0f,
                         DeltaSeconds,
-                        Shared.PitchSpeedDegreesPerSecond)
-                    : TargetPitch;
-            }
-            else
-            {
-                State.CurrentYawDegrees = TargetYaw;
-                State.CurrentPitchDegrees = TargetPitch;
+                        Shared.RecoilReturnSpeed);
+                }
             }
 
             State.CurrentYawDegrees = FMath::Clamp(
@@ -93,16 +107,6 @@ void UMBSTSingleTurretPackProcessor::Execute(FMassEntityManager& EntityManager, 
                 ? FMath::Clamp(State.CurrentPitchDegrees, MinPitch, MaxPitch)
                 : 0.0f;
 
-            if (State.RecoilNormalized > 0.0f
-                && Shared.RecoilReturnSpeed > 0.0f
-                && DeltaSeconds > 0.0f)
-            {
-                State.RecoilNormalized = FMath::FInterpConstantTo(
-                    State.RecoilNormalized,
-                    0.0f,
-                    DeltaSeconds,
-                    Shared.RecoilReturnSpeed);
-            }
             State.RecoilNormalized = FMath::Clamp(State.RecoilNormalized, 0.0f, 1.0f);
 
             Styles[EntityIndex].Index = MBSTPacking::Pack(

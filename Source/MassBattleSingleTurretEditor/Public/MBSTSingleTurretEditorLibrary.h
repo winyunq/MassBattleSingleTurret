@@ -9,8 +9,10 @@
 class AActor;
 class AMassBattleAgentRenderer;
 class UAnimToTextureDataAsset;
+class UMaterial;
 class UMaterialInstanceConstant;
 class UMassBattleAgentConfigDataAsset;
+class UMBSTMobileFireProfile;
 class UMBSTSingleTurretAsset;
 class UMBSTSingleTurretAuthoringComponent;
 class UNiagaraSystem;
@@ -57,6 +59,12 @@ public:
         UStaticMesh* ArticulatedMesh,
         bool bExpectBodyVATMask);
 
+    /** Install the rigid-articulation normal path into the MBST VAT base material. */
+    UFUNCTION(BlueprintCallable, Category = "MassBattle|Single Turret|Editor")
+    static bool ConfigureArticulationBaseMaterial(
+        UMaterial* Material,
+        FString& OutMessage);
+
     UFUNCTION(BlueprintCallable, Category = "MassBattle|Single Turret|Editor")
     static bool ConfigureArticulationMaterialInstance(
         UMaterialInstanceConstant* MaterialInstance,
@@ -77,6 +85,15 @@ public:
         TSubclassOf<AMassBattleAgentRenderer> RendererClass,
         FString& OutMessage);
 
+    /** Add, replace, or remove the per-unit attack-move contract in ExtraData. */
+    UFUNCTION(BlueprintCallable, Category = "MassBattle|Single Turret|Editor")
+    static bool ConfigureAgentConfigMobileFire(
+        UMassBattleAgentConfigDataAsset* AgentConfig,
+        UMBSTMobileFireProfile* Profile,
+        const FMBSTMobileFireState& InitialState,
+        bool bEnable,
+        FString& OutMessage);
+
 private:
     /** Internal finalization step used by Actor-to-single-turret conversion. */
     static bool ConfigureAgentConfigSingleTurret(
@@ -93,6 +110,8 @@ private:
         const FString& PackagePath,
         const FString& AssetName,
         const FMBSTSingleTurretState& InitialState,
+        UMBSTMobileFireProfile* MobileFireProfile,
+        const FMBSTMobileFireState& InitialMobileFireState,
         FString& OutMessage);
 
 public:
@@ -100,6 +119,11 @@ public:
     static FMBSTAssetValidationResult ValidateAgentConfigSingleTurret(
         const UMassBattleAgentConfigDataAsset* AgentConfig,
         const UMBSTSingleTurretAsset* ExpectedLayout = nullptr);
+
+    UFUNCTION(BlueprintPure, Category = "MassBattle|Single Turret|Editor")
+    static FMBSTAssetValidationResult ValidateAgentConfigMobileFire(
+        const UMassBattleAgentConfigDataAsset* AgentConfig,
+        const UMBSTMobileFireProfile* ExpectedProfile = nullptr);
 
     UFUNCTION(BlueprintCallable, Category = "MassBattle|Single Turret|Editor")
     static bool ConfigureAndBakeAnimToTexture(

@@ -121,6 +121,9 @@ float3 MBST_ArticulatePositionObjectSpace(
         AfterPitch,
         TurretPivotObject,
         TurretAxisObject,
+        // Rodrigues' cross(Axis, Vector) form has the same signed-axis
+        // convention as UE's FQuat(Axis, Angle).  AimTurretAtWorldLocation
+        // therefore feeds this value directly: +90 about +Z maps +X to +Y.
         YawPitchSinCos.x,
         YawPitchSinCos.y);
 

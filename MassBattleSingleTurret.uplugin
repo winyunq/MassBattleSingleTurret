@@ -1,9 +1,9 @@
 {
   "FileVersion": 3,
-  "Version": 20000,
-  "VersionName": "0.2.0-beta",
+  "Version": 20100,
+  "VersionName": "0.2.1-mobile-fire",
   "FriendlyName": "MassBattle Single Turret",
-  "Description": "Single-Agent GPU articulation and Actor-to-VAT preparation for MassBattle vehicles with one turret/weapon station.",
+  "Description": "Single-entity GPU turret articulation, Actor-to-VAT authoring, and per-unit stop-to-fire or fire-while-moving attack-move for MassBattle vehicles.",
   "Category": "MassBattle",
   "CreatedBy": "OpenAI",
   "CanContainContent": true,

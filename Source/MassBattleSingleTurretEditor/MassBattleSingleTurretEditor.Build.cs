@@ -30,6 +30,7 @@ public class MassBattleSingleTurretEditor : ModuleRules
             "MeshUtilities",
             "MeshDescription",
             "StaticMeshDescription",
+            "MaterialEditor",
             "NiagaraCore",
             "AnimToTextureEditor",
             "MassAPI"

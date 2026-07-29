@@ -16,6 +16,7 @@ public class MassBattleSingleTurretRuntime : ModuleRules
             "MassCommon",
             "MassAPI",
             "MassBattle",
+            "FlowFieldCanvas",
             "Niagara",
             "AnimToTexture"
         });
@@ -29,7 +30,8 @@ public class MassBattleSingleTurretRuntime : ModuleRules
         {
             "Json",
             "Projects",
-            "RenderCore"
+            "RenderCore",
+            "RHI"
         });
     }
 }

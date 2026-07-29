@@ -1,11 +1,13 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "MBSTMobileFireTypes.h"
 #include "MBSTSingleTurretTypes.h"
 #include "MBSTSingleTurretEditorTypes.generated.h"
 
 class UAnimToTextureDataAsset;
 class UMassBattleAgentConfigDataAsset;
+class UMBSTMobileFireProfile;
 class UMBSTSingleTurretAsset;
 class UStaticMesh;
 
@@ -62,6 +64,17 @@ struct MASSBATTLESINGLETURRETEDITOR_API FMBSTActorToSingleTurretSettings
 
     UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Unit")
     FMBSTSingleTurretState InitialTurretState;
+
+    /**
+     * Optional per-unit attack-move profile. When assigned, Actor conversion
+     * embeds the plugin-owned MobileFire Tag/State/Shared contract into the new
+     * AgentConfig and applies the profile's built-in attack/chase compatibility flags.
+     */
+    UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Mobile Fire")
+    TObjectPtr<UMBSTMobileFireProfile> MobileFireProfile = nullptr;
+
+    UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Mobile Fire", meta = (EditCondition = "MobileFireProfile != nullptr", EditConditionHides))
+    FMBSTMobileFireState InitialMobileFireState;
 
     UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "Diagnostics")
     bool bKeepIntermediateMeshes = false;

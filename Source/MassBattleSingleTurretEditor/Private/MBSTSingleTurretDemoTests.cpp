@@ -4,20 +4,570 @@
 
 #include "MBSTSingleTurretAsset.h"
 #include "MBSTSingleTurretBenchmark.h"
+#include "MBSTMobileFireDemo.h"
+#include "MBSTMobileFireProfile.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "DataAssets/MassBattleAgentConfigDataAsset.h"
+#include "DataAssets/MassBattleProjectileConfigDataAsset.h"
 #include "Components/ActorComponent.h"
 #include "Engine/Blueprint.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
+#include "Fragments/Team.h"
 #include "HAL/PlatformTime.h"
+#include "MeshDescription.h"
 #include "Misc/AutomationTest.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
 #include "Misc/ScopeExit.h"
 #include "NiagaraSystem.h"
+#include "StaticMeshAttributes.h"
 #include "Subsystems/EditorAssetSubsystem.h"
+#include "UObject/GarbageCollection.h"
 #include "Editor.h"
 #include "FileHelpers.h"
 #include "GameFramework/WorldSettings.h"
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FMBSTMobileFireAgentConfigContractTest,
+    "MassBattle.SingleTurret.MobileFire.AgentConfigContract",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMBSTMobileFireAgentConfigContractTest::RunTest(const FString& Parameters)
+{
+    UMassBattleAgentConfigDataAsset* SourceConfig = LoadObject<UMassBattleAgentConfigDataAsset>(
+        nullptr,
+        TEXT("/MassBattleSingleTurret/Demo/Tank/Tank_SingleTurret_AgentConfig.Tank_SingleTurret_AgentConfig"));
+    if (!TestNotNull(TEXT("Existing single-turret demo AgentConfig"), SourceConfig))
+    {
+        return false;
+    }
+
+    UMassBattleAgentConfigDataAsset* TestConfig = DuplicateObject<UMassBattleAgentConfigDataAsset>(
+        SourceConfig,
+        GetTransientPackage());
+    UMBSTMobileFireProfile* StopProfile = NewObject<UMBSTMobileFireProfile>(GetTransientPackage());
+    UMBSTMobileFireProfile* MoveProfile = NewObject<UMBSTMobileFireProfile>(GetTransientPackage());
+    if (!TestNotNull(TEXT("Transient AgentConfig copy"), TestConfig)
+        || !TestNotNull(TEXT("Stop-to-fire profile"), StopProfile)
+        || !TestNotNull(TEXT("Move-fire profile"), MoveProfile))
+    {
+        return false;
+    }
+
+    StopProfile->MobilityPolicy = EMBSTFireMobilityPolicy::AimWhileMovingStopToFire;
+    StopProfile->MaxFireLinearSpeed = 10.0f;
+    StopProfile->MaxFireAngularSpeed = 2.0f;
+    StopProfile->bBrakeImmediatelyWhenTargetInRange = true;
+
+    MoveProfile->MobilityPolicy = EMBSTFireMobilityPolicy::AimAndFireWhileMoving;
+    MoveProfile->MaxFireLinearSpeed = 1000000.0f;
+    MoveProfile->MaxFireAngularSpeed = 1000000.0f;
+
+    FString Message;
+    FMBSTMobileFireState InitialState;
+    TestTrue(
+        TEXT("Configure stop-to-fire contract"),
+        UMBSTSingleTurretEditorLibrary::ConfigureAgentConfigMobileFire(
+            TestConfig,
+            StopProfile,
+            InitialState,
+            true,
+            Message));
+    TestTrue(
+        TEXT("Stop-to-fire contract validates"),
+        UMBSTSingleTurretEditorLibrary::ValidateAgentConfigMobileFire(
+            TestConfig,
+            StopProfile).bValid);
+    TestFalse(TEXT("Built-in attack is suppressed"), TestConfig->Attack.bEnable);
+    TestFalse(TEXT("Built-in chase is suppressed"), TestConfig->Chase.bEnable);
+
+    TestTrue(
+        TEXT("Replace with move-fire contract"),
+        UMBSTSingleTurretEditorLibrary::ConfigureAgentConfigMobileFire(
+            TestConfig,
+            MoveProfile,
+            InitialState,
+            true,
+            Message));
+    TestTrue(
+        TEXT("Move-fire contract validates"),
+        UMBSTSingleTurretEditorLibrary::ValidateAgentConfigMobileFire(
+            TestConfig,
+            MoveProfile).bValid);
+
+    TestTrue(
+        TEXT("Remove mobile-fire contract without removing turret support"),
+        UMBSTSingleTurretEditorLibrary::ConfigureAgentConfigMobileFire(
+            TestConfig,
+            nullptr,
+            InitialState,
+            false,
+            Message));
+    TestTrue(
+        TEXT("Single-turret contract remains valid"),
+        UMBSTSingleTurretEditorLibrary::ValidateAgentConfigSingleTurret(
+            TestConfig,
+            nullptr).bValid);
+    TestFalse(
+        TEXT("Removed mobile-fire contract no longer validates"),
+        UMBSTSingleTurretEditorLibrary::ValidateAgentConfigMobileFire(
+            TestConfig,
+            nullptr).bValid);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FMBSTCreateMobileFireDemoTest,
+    "MassBattle.SingleTurret.MobileFire.CreateDemoAssets",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMBSTCreateMobileFireDemoTest::RunTest(const FString& Parameters)
+{
+    static const FString DemoRoot = TEXT("/MassBattleSingleTurret/Demo/MobileFire");
+    UEditorAssetSubsystem* AssetSubsystem = GEditor
+        ? GEditor->GetEditorSubsystem<UEditorAssetSubsystem>()
+        : nullptr;
+    if (!TestNotNull(TEXT("Editor asset subsystem"), AssetSubsystem))
+    {
+        return false;
+    }
+
+    UMassBattleAgentConfigDataAsset* BaseConfig = LoadObject<UMassBattleAgentConfigDataAsset>(
+        nullptr,
+        TEXT("/MassBattleSingleTurret/Demo/Tank/Tank_SingleTurret_AgentConfig.Tank_SingleTurret_AgentConfig"));
+    if (!TestNotNull(TEXT("Base single-turret AgentConfig"), BaseConfig))
+    {
+        return false;
+    }
+
+    auto GetOrCreateProfile = [&](const TCHAR* Name) -> UMBSTMobileFireProfile*
+    {
+        const FString PackageName = DemoRoot / Name;
+        const FString ObjectPath = FString::Printf(TEXT("%s.%s"), *PackageName, Name);
+        if (UMBSTMobileFireProfile* Existing = LoadObject<UMBSTMobileFireProfile>(nullptr, *ObjectPath))
+        {
+            return Existing;
+        }
+        UPackage* Package = CreatePackage(*PackageName);
+        UMBSTMobileFireProfile* Created = NewObject<UMBSTMobileFireProfile>(
+            Package,
+            Name,
+            RF_Public | RF_Standalone | RF_Transactional);
+        if (Created)
+        {
+            FAssetRegistryModule::AssetCreated(Created);
+        }
+        return Created;
+    };
+
+    UMBSTMobileFireProfile* StopProfile = GetOrCreateProfile(TEXT("DA_MBST_StopToFire"));
+    UMBSTMobileFireProfile* MoveProfile = GetOrCreateProfile(TEXT("DA_MBST_FireWhileMoving"));
+    if (!TestNotNull(TEXT("Persistent stop-to-fire profile"), StopProfile)
+        || !TestNotNull(TEXT("Persistent fire-while-moving profile"), MoveProfile))
+    {
+        return false;
+    }
+
+    StopProfile->Modify();
+    StopProfile->MobilityPolicy = EMBSTFireMobilityPolicy::AimWhileMovingStopToFire;
+    StopProfile->MinimumRange = 0.0f;
+    StopProfile->MaximumRange = 100000.0f;
+    StopProfile->TurretYawToleranceDegrees = 6.0f;
+    StopProfile->BarrelPitchToleranceDegrees = 6.0f;
+    StopProfile->MaxFireLinearSpeed = 25.0f;
+    StopProfile->MaxFireAngularSpeed = 5.0f;
+    StopProfile->BrakeLeadTimeSeconds = 0.15f;
+    StopProfile->bBrakeImmediatelyWhenTargetInRange = false;
+    StopProfile->bHoldDuringWindup = true;
+    StopProfile->bHoldDuringRecover = true;
+    StopProfile->WindupSeconds = 0.1f;
+    StopProfile->RecoverSeconds = 0.15f;
+    StopProfile->CooldownSeconds = 1.25f;
+    StopProfile->bSpawnMassBattleProjectile = false;
+    StopProfile->bEmitFireRequest = true;
+    StopProfile->bBroadcastBlueprintFireEvent = false;
+    StopProfile->bDisableBuiltInAttack = true;
+    StopProfile->bDisableBuiltInChase = true;
+    StopProfile->PostEditChange();
+    StopProfile->MarkPackageDirty();
+
+    MoveProfile->Modify();
+    MoveProfile->MobilityPolicy = EMBSTFireMobilityPolicy::AimAndFireWhileMoving;
+    MoveProfile->MinimumRange = 0.0f;
+    MoveProfile->MaximumRange = 100000.0f;
+    MoveProfile->TurretYawToleranceDegrees = 6.0f;
+    MoveProfile->BarrelPitchToleranceDegrees = 6.0f;
+    MoveProfile->MaxFireLinearSpeed = 1000000.0f;
+    MoveProfile->MaxFireAngularSpeed = 1000000.0f;
+    MoveProfile->bBrakeImmediatelyWhenTargetInRange = false;
+    MoveProfile->WindupSeconds = 0.1f;
+    MoveProfile->RecoverSeconds = 0.15f;
+    MoveProfile->CooldownSeconds = 1.25f;
+    MoveProfile->bSpawnMassBattleProjectile = false;
+    MoveProfile->bEmitFireRequest = true;
+    MoveProfile->bBroadcastBlueprintFireEvent = false;
+    MoveProfile->bDisableBuiltInAttack = true;
+    MoveProfile->bDisableBuiltInChase = true;
+    MoveProfile->PostEditChange();
+    MoveProfile->MarkPackageDirty();
+
+    auto GetOrCreateConfig = [&](const TCHAR* Name) -> UMassBattleAgentConfigDataAsset*
+    {
+        const FString PackageName = DemoRoot / Name;
+        const FString ObjectPath = FString::Printf(TEXT("%s.%s"), *PackageName, Name);
+        if (UMassBattleAgentConfigDataAsset* Existing =
+            LoadObject<UMassBattleAgentConfigDataAsset>(nullptr, *ObjectPath))
+        {
+            return Existing;
+        }
+        UPackage* Package = CreatePackage(*PackageName);
+        UMassBattleAgentConfigDataAsset* Created =
+            DuplicateObject<UMassBattleAgentConfigDataAsset>(BaseConfig, Package, Name);
+        if (Created)
+        {
+            Created->SetFlags(RF_Public | RF_Standalone | RF_Transactional);
+            FAssetRegistryModule::AssetCreated(Created);
+        }
+        return Created;
+    };
+
+    UMassBattleAgentConfigDataAsset* StopConfig = GetOrCreateConfig(TEXT("Tank_StopToFire_AgentConfig"));
+    UMassBattleAgentConfigDataAsset* MoveConfig = GetOrCreateConfig(TEXT("Tank_FireWhileMoving_AgentConfig"));
+    if (!TestNotNull(TEXT("Stop-to-fire AgentConfig"), StopConfig)
+        || !TestNotNull(TEXT("Fire-while-moving AgentConfig"), MoveConfig))
+    {
+        return false;
+    }
+
+    FMBSTMobileFireState InitialState;
+    FString ConfigureMessage;
+    TestTrue(
+        TEXT("Write stop-to-fire contract into AgentConfig"),
+        UMBSTSingleTurretEditorLibrary::ConfigureAgentConfigMobileFire(
+            StopConfig,
+            StopProfile,
+            InitialState,
+            true,
+            ConfigureMessage));
+    TestTrue(
+        TEXT("Write fire-while-moving contract into AgentConfig"),
+        UMBSTSingleTurretEditorLibrary::ConfigureAgentConfigMobileFire(
+            MoveConfig,
+            MoveProfile,
+            InitialState,
+            true,
+            ConfigureMessage));
+    TestTrue(
+        TEXT("Stop-to-fire persistent AgentConfig validates"),
+        UMBSTSingleTurretEditorLibrary::ValidateAgentConfigMobileFire(
+            StopConfig,
+            StopProfile).bValid);
+    TestTrue(
+        TEXT("Fire-while-moving persistent AgentConfig validates"),
+        UMBSTSingleTurretEditorLibrary::ValidateAgentConfigMobileFire(
+            MoveConfig,
+            MoveProfile).bValid);
+
+    bool bSavedAssets = true;
+    bSavedAssets &= AssetSubsystem->SaveLoadedAsset(StopProfile, false);
+    bSavedAssets &= AssetSubsystem->SaveLoadedAsset(MoveProfile, false);
+    bSavedAssets &= AssetSubsystem->SaveLoadedAsset(StopConfig, false);
+    bSavedAssets &= AssetSubsystem->SaveLoadedAsset(MoveConfig, false);
+    TestTrue(TEXT("Saved mobile-fire profiles and AgentConfigs"), bSavedAssets);
+
+    UWorld* World = UEditorLoadingAndSavingUtils::NewBlankMap(false);
+    if (!TestNotNull(TEXT("New mobile-fire demo world"), World))
+    {
+        return false;
+    }
+    AWorldSettings* WorldSettings = World->GetWorldSettings();
+    if (!TestNotNull(TEXT("Mobile-fire demo world settings"), WorldSettings))
+    {
+        return false;
+    }
+    WorldSettings->DefaultGameMode = AMBSTMobileFireDemoGameMode::StaticClass();
+    WorldSettings->bForceNoPrecomputedLighting = true;
+
+    AMBSTMobileFireDemoActor* Demo = World->SpawnActor<AMBSTMobileFireDemoActor>(
+        FVector::ZeroVector,
+        FRotator::ZeroRotator);
+    if (!TestNotNull(TEXT("Mobile-fire demo controller"), Demo))
+    {
+        return false;
+    }
+    Demo->UnitsPerPolicy = 64;
+    Demo->BaseSingleTurretConfig = BaseConfig;
+    Demo->StopToFireProfile = StopProfile;
+    Demo->FireWhileMovingProfile = MoveProfile;
+    Demo->StopToFireAgentConfig = StopConfig;
+    Demo->FireWhileMovingAgentConfig = MoveConfig;
+    Demo->FunctionalTestSeconds = 8.0f;
+
+    const bool bSavedMap = UEditorLoadingAndSavingUtils::SaveMap(
+        World,
+        TEXT("/MassBattleSingleTurret/Demo/MobileFire/Map_MBST_MobileFire"));
+    TestTrue(TEXT("Saved native mobile-fire demo map"), bSavedMap);
+    return bSavedAssets && bSavedMap;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FMBSTCreateRtsMobileFireDemoAssetsTest,
+    "MassBattle.SingleTurret.MobileFire.CreateRtsDemoAssets",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMBSTCreateRtsMobileFireDemoAssetsTest::RunTest(const FString& Parameters)
+{
+    static const FString DemoRoot = TEXT("/MassBattleSingleTurret/Demo/RTS");
+    static constexpr TCHAR ProjectilePath[] =
+        TEXT("/MassBattle/Demo/Projectile/Batched/CannonBall/ProjectileConfig_CannonBall_WarSim.ProjectileConfig_CannonBall_WarSim");
+
+    UEditorAssetSubsystem* AssetSubsystem = GEditor
+        ? GEditor->GetEditorSubsystem<UEditorAssetSubsystem>()
+        : nullptr;
+    UMassBattleAgentConfigDataAsset* BaseConfig = LoadObject<UMassBattleAgentConfigDataAsset>(
+        nullptr,
+        TEXT("/MassBattleSingleTurret/Demo/Tank/Tank_SingleTurret_AgentConfig.Tank_SingleTurret_AgentConfig"));
+    UMassBattleProjectileConfigDataAsset* ProjectileConfig =
+        LoadObject<UMassBattleProjectileConfigDataAsset>(nullptr, ProjectilePath);
+    if (!TestNotNull(TEXT("Editor asset subsystem"), AssetSubsystem)
+        || !TestNotNull(TEXT("Base single-turret AgentConfig"), BaseConfig)
+        || !TestNotNull(TEXT("Existing MassBattle cannonball projectile"), ProjectileConfig))
+    {
+        return false;
+    }
+
+    auto GetOrCreateProfile = [&](const TCHAR* Name) -> UMBSTMobileFireProfile*
+    {
+        const FString PackageName = DemoRoot / Name;
+        const FString ObjectPath = FString::Printf(TEXT("%s.%s"), *PackageName, Name);
+        if (UMBSTMobileFireProfile* Existing =
+            LoadObject<UMBSTMobileFireProfile>(nullptr, *ObjectPath))
+        {
+            return Existing;
+        }
+
+        UPackage* Package = CreatePackage(*PackageName);
+        UMBSTMobileFireProfile* Created = NewObject<UMBSTMobileFireProfile>(
+            Package,
+            Name,
+            RF_Public | RF_Standalone | RF_Transactional);
+        if (Created)
+        {
+            FAssetRegistryModule::AssetCreated(Created);
+        }
+        return Created;
+    };
+
+    UMBSTMobileFireProfile* StopProfile =
+        GetOrCreateProfile(TEXT("DA_MBST_RTS_StopToFire"));
+    UMBSTMobileFireProfile* MoveProfile =
+        GetOrCreateProfile(TEXT("DA_MBST_RTS_FireWhileMoving"));
+    if (!TestNotNull(TEXT("RTS stop-to-fire profile"), StopProfile)
+        || !TestNotNull(TEXT("RTS fire-while-moving profile"), MoveProfile))
+    {
+        return false;
+    }
+
+    auto ConfigureCommonProfile = [ProjectileConfig](UMBSTMobileFireProfile* Profile)
+    {
+        Profile->MinimumRange = 0.0f;
+        Profile->TurretYawToleranceDegrees = 6.0f;
+        Profile->BarrelPitchToleranceDegrees = 8.0f;
+        Profile->TargetPredictionSeconds = 0.0f;
+        Profile->WindupSeconds = 0.10f;
+        Profile->RecoverSeconds = 0.20f;
+        Profile->CooldownSeconds = 2.0f;
+        Profile->RecoilNormalizedOnFire = 1.0f;
+        Profile->bReturnTurretToZeroWhenIdle = false;
+        Profile->bSpawnMassBattleProjectile = true;
+        Profile->ProjectileConfig = ProjectileConfig;
+        Profile->ProjectileMultipliers = FProjectileMultipliers();
+        Profile->bEmitFireRequest = true;
+        Profile->bBroadcastBlueprintFireEvent = false;
+        Profile->bDisableBuiltInAttack = true;
+        Profile->bDisableBuiltInChase = true;
+    };
+
+    StopProfile->Modify();
+    ConfigureCommonProfile(StopProfile);
+    StopProfile->MobilityPolicy = EMBSTFireMobilityPolicy::AimWhileMovingStopToFire;
+    StopProfile->MaximumRange = 6000.0f;
+    StopProfile->MaxFireLinearSpeed = 25.0f;
+    StopProfile->MaxFireAngularSpeed = 5.0f;
+    StopProfile->BrakeLeadTimeSeconds = 0.15f;
+    StopProfile->bBrakeImmediatelyWhenTargetInRange = true;
+    StopProfile->bHoldDuringWindup = true;
+    StopProfile->bHoldDuringRecover = true;
+    StopProfile->PostEditChange();
+    StopProfile->MarkPackageDirty();
+
+    MoveProfile->Modify();
+    ConfigureCommonProfile(MoveProfile);
+    MoveProfile->MobilityPolicy = EMBSTFireMobilityPolicy::AimAndFireWhileMoving;
+    // Keep range equal in the behavior-comparison map so a fast unit cannot
+    // cross a short firing window before its turret finishes aligning. Moving
+    // fire retains the intended 0.5x damage tradeoff.
+    MoveProfile->MaximumRange = 6000.0f;
+    MoveProfile->MaxFireLinearSpeed = 1000000.0f;
+    MoveProfile->MaxFireAngularSpeed = 1000000.0f;
+    MoveProfile->BrakeLeadTimeSeconds = 0.0f;
+    MoveProfile->bBrakeImmediatelyWhenTargetInRange = false;
+    MoveProfile->bHoldDuringWindup = false;
+    MoveProfile->bHoldDuringRecover = false;
+    MoveProfile->ProjectileMultipliers.Static.DmgMult = 0.5f;
+    MoveProfile->ProjectileMultipliers.Interped.DmgMult = 0.5f;
+    MoveProfile->ProjectileMultipliers.Ballistic.DmgMult = 0.5f;
+    MoveProfile->ProjectileMultipliers.Tracking.DmgMult = 0.5f;
+    MoveProfile->PostEditChange();
+    MoveProfile->MarkPackageDirty();
+
+    auto GetOrCreateConfig = [&](const TCHAR* Name) -> UMassBattleAgentConfigDataAsset*
+    {
+        const FString PackageName = DemoRoot / Name;
+        const FString ObjectPath = FString::Printf(TEXT("%s.%s"), *PackageName, Name);
+        if (UMassBattleAgentConfigDataAsset* Existing =
+            LoadObject<UMassBattleAgentConfigDataAsset>(nullptr, *ObjectPath))
+        {
+            return Existing;
+        }
+
+        UPackage* Package = CreatePackage(*PackageName);
+        UMassBattleAgentConfigDataAsset* Created =
+            DuplicateObject<UMassBattleAgentConfigDataAsset>(BaseConfig, Package, Name);
+        if (Created)
+        {
+            Created->SetFlags(RF_Public | RF_Standalone | RF_Transactional);
+            FAssetRegistryModule::AssetCreated(Created);
+        }
+        return Created;
+    };
+
+    UMassBattleAgentConfigDataAsset* StopConfig =
+        GetOrCreateConfig(TEXT("Tank_RTS_StopToFire_AgentConfig"));
+    UMassBattleAgentConfigDataAsset* MoveConfig =
+        GetOrCreateConfig(TEXT("Tank_RTS_FireWhileMoving_AgentConfig"));
+    if (!TestNotNull(TEXT("RTS stop-to-fire AgentConfig"), StopConfig)
+        || !TestNotNull(TEXT("RTS fire-while-moving AgentConfig"), MoveConfig))
+    {
+        return false;
+    }
+
+    auto ConfigureRtsAgent = [&](
+        UMassBattleAgentConfigDataAsset* Config,
+        UMBSTMobileFireProfile* Profile) -> bool
+    {
+        Config->Modify();
+        Config->Health.Current = 1000000.0f;
+        Config->Health.Maximum = 1000000.0f;
+        Config->Health.bLockHealth = false;
+        Config->Select.bEnable = true;
+        Config->Navigation.bMoveByFlowfieldOnIdle = false;
+        Config->Navigation.bUseAStar = false;
+        Config->Trace.bEnable = true;
+        Config->Trace.Mode = ETraceMode::SectorTraceByTraits;
+        Config->Trace.SectorTrace.Common.TraceRadius = 7500.0f;
+        Config->Trace.SectorTrace.Common.TraceAngle = 360.0f;
+        Config->Trace.SectorTrace.Common.TraceHeight = 5000.0f;
+        Config->Trace.SectorTrace.Common.SortMode = ESortMode::NearToFar;
+        Config->Trace.SectorTrace.Common.CoolDown = 0.5f;
+        Config->Trace.SectorTrace.Common.KeepCount = 1;
+        Config->Trace.SectorTrace.Common.bCheckObstacle = false;
+        Config->Trace.RandomDelayOnInit = FVector2f(0.0f, 0.25f);
+        Config->Trace.bSkipTraceWhileTargetValid = true;
+        Config->Trace.bCheckLOSWhileTargetValid = false;
+        Config->Trace.bRetraceImmediatelyOnTargetLoss = true;
+        Config->Trace.Query = FMassBattleQuery();
+        Config->Attack.Range = Profile->MaximumRange;
+        Config->Attack.RangeToleranceHit = Profile->MaximumRange;
+
+        FMBSTMobileFireState InitialState;
+        FString ConfigureMessage;
+        const bool bConfigured =
+            UMBSTSingleTurretEditorLibrary::ConfigureAgentConfigMobileFire(
+                Config,
+                Profile,
+                InitialState,
+                true,
+                ConfigureMessage);
+        AddInfo(ConfigureMessage);
+        Config->PostEditChange();
+        Config->MarkPackageDirty();
+        return bConfigured;
+    };
+
+    const bool bStopConfigured = ConfigureRtsAgent(StopConfig, StopProfile);
+    const bool bMoveConfigured = ConfigureRtsAgent(MoveConfig, MoveProfile);
+    TestTrue(TEXT("Configured RTS stop-to-fire AgentConfig"), bStopConfigured);
+    TestTrue(TEXT("Configured RTS fire-while-moving AgentConfig"), bMoveConfigured);
+
+    // Refresh the optional team-1 map clone when it already exists. It keeps
+    // the same renderer/layout as the corrected base unit; only target filters
+    // differ between teams.
+    UMassBattleAgentConfigDataAsset* MoveTeam1Config =
+        LoadObject<UMassBattleAgentConfigDataAsset>(
+            nullptr,
+            TEXT("/MassBattleSingleTurret/Demo/RTS/Tank_RTS_FireWhileMoving_Team1_AgentConfig.Tank_RTS_FireWhileMoving_Team1_AgentConfig"));
+    bool bMoveTeam1Configured = true;
+    if (MoveTeam1Config)
+    {
+        bMoveTeam1Configured = ConfigureRtsAgent(MoveTeam1Config, MoveProfile);
+        MoveTeam1Config->Trace.Query = FMassBattleQuery();
+        MoveTeam1Config->Trace.Query.All<FAgentTag, FTeam0Tag>();
+        MoveTeam1Config->Damage.Query = FMassBattleQuery();
+        MoveTeam1Config->Damage.Query.All<FAgentTag, FTeam0Tag>();
+        MoveTeam1Config->PostEditChange();
+        MoveTeam1Config->MarkPackageDirty();
+        TestTrue(TEXT("Refreshed team-1 moving-fire map clone"), bMoveTeam1Configured);
+    }
+
+    const FMBSTAssetValidationResult StopValidation =
+        UMBSTSingleTurretEditorLibrary::ValidateAgentConfigMobileFire(
+            StopConfig,
+            StopProfile);
+    const FMBSTAssetValidationResult MoveValidation =
+        UMBSTSingleTurretEditorLibrary::ValidateAgentConfigMobileFire(
+            MoveConfig,
+            MoveProfile);
+    for (const FString& Message : StopValidation.Messages)
+    {
+        AddInfo(Message);
+    }
+    for (const FString& Message : MoveValidation.Messages)
+    {
+        AddInfo(Message);
+    }
+    TestTrue(TEXT("RTS stop-to-fire contract validates"), StopValidation.bValid);
+    TestTrue(TEXT("RTS fire-while-moving contract validates"), MoveValidation.bValid);
+    TestEqual(TEXT("Stop-to-fire range"), StopProfile->MaximumRange, 6000.0f);
+    TestEqual(TEXT("Fire-while-moving comparison range"), MoveProfile->MaximumRange, 6000.0f);
+    TestEqual(TEXT("Fire-while-moving ballistic damage is 0.5x"),
+        MoveProfile->ProjectileMultipliers.Ballistic.DmgMult,
+        0.5f);
+    TestTrue(TEXT("Stop-to-fire spawns the existing cannonball"),
+        StopProfile->bSpawnMassBattleProjectile && StopProfile->ProjectileConfig == ProjectileConfig);
+    TestTrue(TEXT("Fire-while-moving spawns the existing cannonball"),
+        MoveProfile->bSpawnMassBattleProjectile && MoveProfile->ProjectileConfig == ProjectileConfig);
+
+    bool bSaved = true;
+    bSaved &= AssetSubsystem->SaveLoadedAsset(StopProfile, false);
+    bSaved &= AssetSubsystem->SaveLoadedAsset(MoveProfile, false);
+    bSaved &= AssetSubsystem->SaveLoadedAsset(StopConfig, false);
+    bSaved &= AssetSubsystem->SaveLoadedAsset(MoveConfig, false);
+    if (MoveTeam1Config)
+    {
+        bSaved &= AssetSubsystem->SaveLoadedAsset(MoveTeam1Config, false);
+    }
+    TestTrue(TEXT("Saved dedicated RTS profiles and AgentConfigs"), bSaved);
+
+    return bStopConfigured
+        && bMoveConfigured
+        && bMoveTeam1Configured
+        && StopValidation.bValid
+        && MoveValidation.bValid
+        && bSaved;
+}
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
     FMBSTCreateBenchmarkMapsTest,
@@ -33,8 +583,9 @@ bool FMBSTCreateBenchmarkMapsTest::RunTest(const FString& Parameters)
     };
     const FMapSpec Specs[] =
     {
-        { TEXT("/MassBattleSingleTurret/Demo/Benchmark/Map_MBST_Legacy_5000v5000"), EMBSTBenchmarkScenario::LegacyCompound },
-        { TEXT("/MassBattleSingleTurret/Demo/Benchmark/Map_MBST_SingleTurret_5000v5000"), EMBSTBenchmarkScenario::SingleTurret }
+        // One neutral map is launched as three independent processes through
+        // -MBSTScenario=actor|mass|turret, keeping scene/camera/target identical.
+        { TEXT("/MassBattleSingleTurret/Demo/Benchmark/Map_MBST_NativeTrackingBenchmark"), EMBSTBenchmarkScenario::SingleTurret }
     };
 
     bool bAllSaved = true;
@@ -61,16 +612,152 @@ bool FMBSTCreateBenchmarkMapsTest::RunTest(const FString& Parameters)
             return false;
         }
         Controller->Scenario = Spec.Scenario;
-        Controller->TanksPerSide = 5000;
-        Controller->WarmupSeconds = 10.0f;
-        Controller->SampleSeconds = 20.0f;
-        Controller->LegacyActorsPerFrame = 250;
+        Controller->UnitCount = 500;
+        Controller->WarmupSeconds = 8.0f;
+        Controller->SampleSeconds = 15.0f;
+        Controller->LegacyActorsPerFrame = 100;
+        Controller->TargetOrbitRadius = 10000.0f;
+        Controller->TargetOrbitPeriodSeconds = 12.0f;
+        Controller->TargetHealth = 1000000000.0f;
 
         const bool bSaved = UEditorLoadingAndSavingUtils::SaveMap(World, Spec.PackagePath);
         TestTrue(FString::Printf(TEXT("Saved %s"), Spec.PackagePath), bSaved);
         bAllSaved &= bSaved;
     }
     return bAllSaved;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FMBSTYawHandednessTest,
+    "MassBattle.SingleTurret.Articulation.YawHandedness",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMBSTYawHandednessTest::RunTest(const FString& Parameters)
+{
+    const UMBSTSingleTurretAsset* Layout = LoadObject<UMBSTSingleTurretAsset>(
+        nullptr,
+        TEXT("/MassBattleSingleTurret/Demo/Tank/Tank_SingleTurret_SingleTurret.Tank_SingleTurret_SingleTurret"));
+    if (!TestNotNull(TEXT("Generated tank single-turret layout"), Layout))
+    {
+        return false;
+    }
+
+    const FVector Pivot(Layout->TurretPivotObjectSpace);
+    UStaticMesh* ArticulatedMesh = Layout->ArticulatedMesh.Get();
+    if (!TestNotNull(TEXT("Generated articulated mesh"), ArticulatedMesh))
+    {
+        return false;
+    }
+    FMeshDescription* MeshDescription = ArticulatedMesh->GetMeshDescription(0);
+    if (!TestNotNull(TEXT("Generated articulated mesh LOD0 description"), MeshDescription))
+    {
+        return false;
+    }
+
+    FStaticMeshAttributes MeshAttributes(*MeshDescription);
+    const TVertexAttributesConstRef<FVector3f> Positions = MeshAttributes.GetVertexPositions();
+    const TVertexInstanceAttributesConstRef<FVector4f> Colors = MeshAttributes.GetVertexInstanceColors();
+    FVector FarthestYawVertexDirection = FVector::ZeroVector;
+    float FarthestYawVertexDistanceSquared = 0.0f;
+    for (const FVertexInstanceID VertexInstanceID : MeshDescription->VertexInstances().GetElementIDs())
+    {
+        if (!Colors.IsValid() || Colors[VertexInstanceID].X <= 0.5f)
+        {
+            continue;
+        }
+        const FVertexID VertexID = MeshDescription->GetVertexInstanceVertex(VertexInstanceID);
+        FVector Direction = FVector(Positions[VertexID]) - Pivot;
+        Direction.Z = 0.0;
+        const float DistanceSquared = Direction.SizeSquared();
+        if (DistanceSquared > FarthestYawVertexDistanceSquared)
+        {
+            FarthestYawVertexDistanceSquared = DistanceSquared;
+            FarthestYawVertexDirection = Direction.GetSafeNormal();
+        }
+    }
+    AddInfo(FString::Printf(
+        TEXT("Generated yaw-mask farthest horizontal direction=(%.3f, %.3f, %.3f), declared barrel forward=(%.3f, %.3f, %.3f)."),
+        FarthestYawVertexDirection.X,
+        FarthestYawVertexDirection.Y,
+        FarthestYawVertexDirection.Z,
+        Layout->BarrelForwardAxisObjectSpace.X,
+        Layout->BarrelForwardAxisObjectSpace.Y,
+        Layout->BarrelForwardAxisObjectSpace.Z));
+
+    struct FYawCase
+    {
+        float YawDegrees;
+        FVector ExpectedForward;
+        const TCHAR* Label;
+    };
+    const FYawCase Cases[] =
+    {
+        { 0.0f, FVector::ForwardVector, TEXT("0 degrees maps +X to +X") },
+        { 90.0f, FVector::YAxisVector, TEXT("+90 degrees maps +X to +Y") },
+        { -90.0f, -FVector::YAxisVector, TEXT("-90 degrees maps +X to -Y") },
+        { 180.0f, -FVector::ForwardVector, TEXT("180 degrees maps +X to -X") }
+    };
+
+    for (const FYawCase& Case : Cases)
+    {
+        const FTransform Muzzle = Layout->CalculateMuzzleWorldTransform(
+            FTransform::Identity,
+            Case.YawDegrees,
+            0.0f,
+            0.0f);
+        const FVector ActualForward = FVector(
+            Muzzle.GetLocation().X - Pivot.X,
+            Muzzle.GetLocation().Y - Pivot.Y,
+            0.0).GetSafeNormal();
+        TestTrue(
+            Case.Label,
+            FVector::DotProduct(ActualForward, Case.ExpectedForward) > 0.999f);
+    }
+
+    FString ShaderText;
+    const FString ShaderPath = FPaths::Combine(
+        FPaths::ProjectPluginsDir(),
+        TEXT("MassBattleSingleTurret/Shaders/Private/MBSTSingleTurret.ush"));
+    if (!TestTrue(TEXT("Yaw articulation shader can be read"), FFileHelper::LoadFileToString(ShaderText, *ShaderPath)))
+    {
+        return false;
+    }
+
+    const auto CountOccurrences = [](const FString& Haystack, const TCHAR* Needle)
+    {
+        int32 Count = 0;
+        int32 SearchFrom = 0;
+        const int32 NeedleLength = FCString::Strlen(Needle);
+        while (NeedleLength > 0)
+        {
+            const int32 FoundAt = Haystack.Find(
+                Needle,
+                ESearchCase::CaseSensitive,
+                ESearchDir::FromStart,
+                SearchFrom);
+            if (FoundAt == INDEX_NONE)
+            {
+                break;
+            }
+            ++Count;
+            SearchFrom = FoundAt + NeedleLength;
+        }
+        return Count;
+    };
+
+    const int32 NegatedYawCount = CountOccurrences(ShaderText, TEXT("-YawPitchSinCos.x"));
+    const int32 DirectYawCount = CountOccurrences(ShaderText, TEXT("YawPitchSinCos.x,"));
+
+    TestEqual(
+        TEXT("GPU yaw must not negate the CPU/FQuat yaw sine"),
+        NegatedYawCount,
+        0);
+    TestTrue(
+        TEXT("Position and normal articulation both consume the direct yaw sine"),
+        DirectYawCount >= 2);
+
+    AddInfo(TEXT("Yaw contract: UE +X forward, +Y right, +Z up; +90 degrees about +Z maps +X to +Y on both CPU and GPU."));
+    return !HasAnyErrors();
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
@@ -88,15 +775,52 @@ bool FMBSTGenerateDemoTankTest::RunTest(const FString& Parameters)
     // Idempotent verification path for an already-generated demo.
     if (UMassBattleAgentConfigDataAsset* ExistingConfig = LoadObject<UMassBattleAgentConfigDataAsset>(nullptr, ConfigPath))
     {
-        const UMBSTSingleTurretAsset* ExistingLayout = LoadObject<UMBSTSingleTurretAsset>(nullptr, LayoutPath);
-        const FMBSTAssetValidationResult Validation =
+        UMBSTSingleTurretAsset* ExistingLayout = LoadObject<UMBSTSingleTurretAsset>(nullptr, LayoutPath);
+        const FMBSTAssetValidationResult ConfigValidation =
             UMBSTSingleTurretEditorLibrary::ValidateAgentConfigSingleTurret(ExistingConfig, ExistingLayout);
-        for (const FString& Message : Validation.Messages)
+        const FMBSTAssetValidationResult MeshValidation =
+            UMBSTSingleTurretEditorLibrary::ValidateGeneratedArticulatedMesh(
+                ExistingLayout ? ExistingLayout->ArticulatedMesh : nullptr,
+                ExistingLayout ? ExistingLayout->bBodyUsesVAT : false);
+        for (const FString& Message : ConfigValidation.Messages)
         {
             AddInfo(Message);
         }
-        TestTrue(TEXT("Existing demo AgentConfig contains the generated turret contract"), Validation.bValid);
-        return Validation.bValid;
+        for (const FString& Message : MeshValidation.Messages)
+        {
+            AddInfo(Message);
+        }
+        if (ConfigValidation.bValid && MeshValidation.bValid)
+        {
+            TestTrue(TEXT("Existing demo AgentConfig contains the generated turret contract"), ConfigValidation.bValid);
+            TestTrue(TEXT("Existing demo mesh preserves body/turret articulation masks"), MeshValidation.bValid);
+            return true;
+        }
+        AddWarning(TEXT("The existing generated demo is invalid and will be rebuilt."));
+
+        UEditorAssetSubsystem* CleanupSubsystem = GEditor->GetEditorSubsystem<UEditorAssetSubsystem>();
+        if (!TestNotNull(TEXT("Editor asset subsystem for invalid demo cleanup"), CleanupSubsystem))
+        {
+            return false;
+        }
+
+        TArray<UObject*> InvalidGeneratedAssets;
+        InvalidGeneratedAssets.Add(ExistingConfig);
+        if (ExistingLayout)
+        {
+            if (ExistingLayout->ArticulatedMesh)
+            {
+                InvalidGeneratedAssets.Add(ExistingLayout->ArticulatedMesh);
+            }
+            InvalidGeneratedAssets.Add(ExistingLayout);
+        }
+        if (!TestTrue(
+            TEXT("Deleted invalid generated demo assets before regeneration"),
+            CleanupSubsystem->DeleteLoadedAssets(InvalidGeneratedAssets)))
+        {
+            return false;
+        }
+        CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
     }
 
     UBlueprint* TankBlueprint = LoadObject<UBlueprint>(
@@ -243,6 +967,16 @@ bool FMBSTGenerateDemoTankTest::RunTest(const FString& Parameters)
     }
     TestTrue(TEXT("Generated config embeds exactly one turret Tag/State/Shared layout"), ConfigValidation.bValid);
 
+    const FMBSTAssetValidationResult MeshValidation =
+        UMBSTSingleTurretEditorLibrary::ValidateGeneratedArticulatedMesh(
+            Result.ArticulatedMesh,
+            Authoring->bBodyUsesVAT);
+    for (const FString& Message : MeshValidation.Messages)
+    {
+        AddInfo(Message);
+    }
+    TestTrue(TEXT("Generated mesh preserves body/turret articulation masks"), MeshValidation.bValid);
+
     UEditorAssetSubsystem* AssetSubsystem = GEditor->GetEditorSubsystem<UEditorAssetSubsystem>();
     if (!TestNotNull(TEXT("Editor asset subsystem"), AssetSubsystem))
     {
@@ -252,7 +986,7 @@ bool FMBSTGenerateDemoTankTest::RunTest(const FString& Parameters)
     const bool bSavedLayout = AssetSubsystem->SaveLoadedAsset(Result.LayoutAsset, false);
     const bool bSavedConfig = AssetSubsystem->SaveLoadedAsset(Result.AgentConfig, false);
     TestTrue(TEXT("Saved generated demo assets"), bSavedMesh && bSavedLayout && bSavedConfig);
-    return ConfigValidation.bValid && bSavedMesh && bSavedLayout && bSavedConfig;
+    return ConfigValidation.bValid && MeshValidation.bValid && bSavedMesh && bSavedLayout && bSavedConfig;
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
