@@ -164,4 +164,4 @@ Tools/run_native_tracking_benchmark.ps1 -Units 500
 
 ## 📜 许可与贡献
 
-本插件作为 MassBattle 生态扩展模块发布。欢迎提交 Issue 与 Pull Request！
+本插件遵循 [MIT License](LICENSE) 开源协议。欢迎提交 Issue 与 Pull Request！

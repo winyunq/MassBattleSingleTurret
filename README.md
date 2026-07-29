@@ -141,4 +141,4 @@ Tools/run_native_tracking_benchmark.ps1 -Units 500
 
 ## 📜 License & Contribution
 
-Released as an extension plugin for the MassBattle ecosystem. Issues and pull requests are welcome!
+Released under the [MIT License](LICENSE). Issues and pull requests are welcome!
