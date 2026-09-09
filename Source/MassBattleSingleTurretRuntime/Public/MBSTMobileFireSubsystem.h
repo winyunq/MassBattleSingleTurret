@@ -20,6 +20,8 @@ class MASSBATTLESINGLETURRETRUNTIME_API UMBSTMobileFireSubsystem : public UWorld
     GENERATED_BODY()
 
 public:
+    virtual void Initialize(FSubsystemCollectionBase& Collection) override;
+
     UPROPERTY(BlueprintAssignable, Category = "MassBattle|Single Turret|Mobile Fire")
     FMBSTFireRequestDynamicDelegate OnFireRequest;
 
@@ -34,6 +36,7 @@ public:
     int32 GetPendingFireRequestCount() const;
 
 private:
+    bool bLockstepProcessorsInstalled = false;
     mutable FCriticalSection PendingRequestsMutex;
     TArray<FMBSTFireRequest> PendingRequests;
 };

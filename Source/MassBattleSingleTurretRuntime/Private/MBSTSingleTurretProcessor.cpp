@@ -1,18 +1,38 @@
 #include "MBSTSingleTurretProcessor.h"
 
+#include "MBSTMobileFireTypes.h"
 #include "MBSTSingleTurretTypes.h"
 #include "Fragments/StyleType.h"
 #include "MassAPIStructs.h"
 #include "MassExecutionContext.h"
-#include "Engine/World.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
+#include "Subsystems/MassBattleSubsystem.h"
+
+namespace MBSTSingleTurretProcessorPrivate
+{
+    static bool IsFeatureDisabledForBenchmarkAB()
+    {
+        FString ScenarioToken;
+        return FParse::Value(FCommandLine::Get(), TEXT("MBSTScenario="), ScenarioToken)
+            && (ScenarioToken.Equals(TEXT("mass"), ESearchCase::IgnoreCase)
+                || ScenarioToken.Equals(TEXT("baseline"), ESearchCase::IgnoreCase));
+    }
+}
 
 UMBSTSingleTurretPackProcessor::UMBSTSingleTurretPackProcessor()
     : EntityQuery(*this)
 {
     ExecutionOrder.ExecuteBefore.Add(TEXT("MassBattleAgentRenderProcessor"));
     ExecutionFlags = static_cast<int32>(EProcessorExecutionFlags::Client | EProcessorExecutionFlags::Server | EProcessorExecutionFlags::Standalone);
-    ProcessingPhase = EMassProcessingPhase::FrameEnd;
-    bAutoRegisterWithProcessingPhases = true;
+    // MassBattleFrame 1.19.7 dispatches its renderer manually from
+    // TG_PostUpdateWork. StartPhysics is the last public plugin phase that can
+    // prepare Style before that renderer without changing MassBattleFrame.
+    ProcessingPhase = EMassProcessingPhase::StartPhysics;
+    // A/B feature-off runs retain the exact same entity archetype and renderer,
+    // but omit this plugin processor just as a disabled turret feature would.
+    bAutoRegisterWithProcessingPhases =
+        !MBSTSingleTurretProcessorPrivate::IsFeatureDisabledForBenchmarkAB();
     bRequiresGameThreadExecution = false;
     ExecutionPriority = 5;
 }
@@ -21,6 +41,7 @@ void UMBSTSingleTurretPackProcessor::ConfigureQueries(const TSharedRef<FMassEnti
 {
     FEntityQueryBuilder(EntityQuery)
         .All<FMBSTSingleTurretTag>()
+        .None<FMBSTMobileFireTag>()
         .All<FMBSTSingleTurretState, FStyleType>(MARW)
         .All<FMBSTSingleTurretShared>(MARO)
         .RegisterWithProcessor(*this);
@@ -28,9 +49,15 @@ void UMBSTSingleTurretPackProcessor::ConfigureQueries(const TSharedRef<FMassEnti
 
 void UMBSTSingleTurretPackProcessor::Execute(FMassEntityManager& EntityManager, FMassExecutionContext& Context)
 {
-    const float DeltaSeconds = Context.GetWorld()
-        ? FMath::Max(Context.GetWorld()->GetDeltaSeconds(), 0.0f)
-        : 0.0f;
+    TRACE_CPUPROFILER_EVENT_SCOPE(MBSTSingleTurretLogicPack);
+
+    UMassBattleSubsystem* MassBattle = UMassBattleSubsystem::GetPtr(this);
+    if (!MassBattle || !MassBattle->IsSubFrameScheduled(ESubFrame::Subtick3))
+    {
+        return;
+    }
+
+    const float DeltaSeconds = FMath::Max(MassBattle->GetCalculatedStepTime(), 0.0f);
 
     EntityQuery.ForEachEntityChunk(Context, [DeltaSeconds](FMassExecutionContext& ChunkContext)
     {
@@ -99,21 +126,7 @@ void UMBSTSingleTurretPackProcessor::Execute(FMassEntityManager& EntityManager, 
                 }
             }
 
-            State.CurrentYawDegrees = FMath::Clamp(
-                FMath::UnwindDegrees(State.CurrentYawDegrees),
-                MinYaw,
-                MaxYaw);
-            State.CurrentPitchDegrees = Shared.bHasBarrelPitch
-                ? FMath::Clamp(State.CurrentPitchDegrees, MinPitch, MaxPitch)
-                : 0.0f;
-
-            State.RecoilNormalized = FMath::Clamp(State.RecoilNormalized, 0.0f, 1.0f);
-
-            Styles[EntityIndex].Index = MBSTPacking::Pack(
-                static_cast<int32>(State.VisualStyle),
-                State.CurrentYawDegrees,
-                State.CurrentPitchDegrees,
-                State.RecoilNormalized);
+            Styles[EntityIndex].Index = MBSTPacking::SanitizeAndPack(State, Shared);
         }
     });
 }

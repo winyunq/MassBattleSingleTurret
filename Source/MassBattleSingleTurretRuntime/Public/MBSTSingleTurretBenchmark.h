@@ -21,10 +21,10 @@ enum class EMBSTBenchmarkScenario : uint8
     /** The untouched MassBattleFrame BP_TankActor compound architecture. */
     LegacyCompound,
 
-    /** One ordinary Mass entity; the complete tank rotates to track the target. */
+    /** Same turret-capable MassBattleFrame entity, with turret processing disabled and the complete tank rotating. */
     MassBaseline,
 
-    /** One Mass entity whose GPU-rendered turret tracks independently. */
+    /** Same MassBattleFrame entity and renderer, with independent GPU-rendered turret tracking enabled. */
     SingleTurret
 };
 
@@ -53,7 +53,7 @@ struct MASSBATTLESINGLETURRETRUNTIME_API FMBSTBenchmarkMassBaselineTag : public 
     GENERATED_BODY()
 };
 
-/** Benchmark-only tag for the plugin's direct single-turret entity. */
+/** Benchmark-only tag shared by both feature-off and feature-on A/B entities. */
 USTRUCT()
 struct MASSBATTLESINGLETURRETRUNTIME_API FMBSTBenchmarkSingleTurretTag : public FA_MassBattleBaseTag
 {
@@ -104,6 +104,17 @@ public:
 
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MassBattle|Single Turret|Benchmark", meta = (ClampMin = "1.0"))
     float SampleSeconds = 15.0f;
+
+    /** Performance target profile: 60 Hz display from a 15 Hz authoritative Mass logic frame. */
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MassBattle|Single Turret|Benchmark", meta = (ClampMin = "1.0", ClampMax = "60.0"))
+    float LogicHz = 15.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MassBattle|Single Turret|Benchmark")
+    bool bUseFrameSpreading = true;
+
+    /** Niagara logical slots per renderer-owned component. CLI: -MBSTBatchSize=10000. */
+    UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MassBattle|Single Turret|Benchmark", meta = (ClampMin = "1"))
+    int32 RenderBatchSize = 10000;
 
     UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "MassBattle|Single Turret|Benchmark", meta = (ClampMin = "1"))
     int32 LegacyActorsPerFrame = 100;
@@ -210,6 +221,7 @@ private:
     void EnterWarmup();
     void EnterSampling();
     void FinishSampling();
+    bool ValidateRenderPopulation(const TCHAR* Stage) const;
     void WriteResultJson();
     void CaptureScreenshot(const FString& Suffix, bool bCloseView, bool bVisualAimLines);
     void FlushPendingScreenshot();
@@ -256,6 +268,7 @@ private:
     bool bResultCaptured = false;
     bool bPendingVisualAimProof = false;
     bool bRenderDiagnosticsLogged = false;
+    bool bProfileGPUAtSampling = false;
     int32 PendingScreenshotFrames = 0;
 };
 

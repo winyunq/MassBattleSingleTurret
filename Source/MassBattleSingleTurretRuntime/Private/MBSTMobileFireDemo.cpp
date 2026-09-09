@@ -223,7 +223,9 @@ bool AMBSTMobileFireDemoActor::SpawnTarget()
             FRotator::ZeroRotator);
         if (TargetVisual)
         {
+#if WITH_EDITOR
             TargetVisual->SetActorLabel(TEXT("MBST_Moving_Target"));
+#endif
             TargetVisual->GetStaticMeshComponent()->SetStaticMesh(Cylinder);
             TargetVisual->GetStaticMeshComponent()->SetCollisionEnabled(ECollisionEnabled::NoCollision);
             TargetVisual->GetStaticMeshComponent()->SetMobility(EComponentMobility::Movable);

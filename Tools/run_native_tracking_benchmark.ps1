@@ -17,6 +17,17 @@ param(
     [ValidateRange(1.0, 3600.0)]
     [double]$TargetPeriodSeconds = 12.0,
 
+    [ValidateRange(1.0, 60.0)]
+    [double]$LogicHz = 15.0,
+
+    [ValidateRange(1, 1000000)]
+    [int]$BatchSize = 10000,
+
+    [ValidateSet('actor', 'mass', 'turret')]
+    [string[]]$Scenarios = @('mass', 'turret'),
+
+    [string]$DisablePlugins = 'FogOfWar',
+
     [string]$UnrealEditor = 'D:\UE_5.8\Engine\Binaries\Win64\UnrealEditor.exe',
     [string]$Project,
     [string]$OutputRoot,
@@ -42,11 +53,6 @@ if (-not (Test-Path -LiteralPath $Project)) {
 }
 
 $Map = '/MassBattleSingleTurret/Demo/Benchmark/Map_MBST_NativeTrackingBenchmark'
-$ScenarioOrders = @(
-    @('actor', 'mass', 'turret'),
-    @('turret', 'mass', 'actor'),
-    @('mass', 'actor', 'turret')
-)
 $ScenarioFiles = @{
     actor = 'Actor'
     mass = 'Mass'
@@ -59,7 +65,12 @@ if (-not $SummarizeOnly) {
 for ($RunIndex = 1; $RunIndex -le $Repetitions; ++$RunIndex) {
     $RunDirectory = Join-Path $OutputRoot "Run$RunIndex"
     New-Item -ItemType Directory -Force -Path $RunDirectory | Out-Null
-    $Order = $ScenarioOrders[($RunIndex - 1) % $ScenarioOrders.Count]
+    $Order = if (($RunIndex % 2) -eq 1) {
+        @($Scenarios)
+    }
+    else {
+        @($Scenarios[($Scenarios.Count - 1)..0])
+    }
 
     foreach ($Scenario in $Order) {
         $LogPath = Join-Path (Split-Path -Parent $Project) "Saved\Logs\MBST_Native_${Units}_Run${RunIndex}_${Scenario}.log"
@@ -74,16 +85,23 @@ for ($RunIndex = 1; $RunIndex -le $Repetitions; ++$RunIndex) {
             '-NoVSync',
             '-NoSplash',
             '-NoLoadingScreen',
+            '-NoSound',
             '-unattended',
+            '-ExecCmds=t.MaxFPS 0',
             "-MBSTScenario=$Scenario",
             "-MBSTUnits=$Units",
             "-MBSTWarmup=$WarmupSeconds",
             "-MBSTSample=$SampleSeconds",
+            "-MBSTLogicHz=$LogicHz",
+            "-MBSTBatchSize=$BatchSize",
             "-MBSTTargetRadius=$TargetRadius",
             "-MBSTTargetPeriod=$TargetPeriodSeconds",
             "-MBSTOutputDir=$RunDirectory",
             "-abslog=$LogPath"
         )
+        if ($DisablePlugins) {
+            $Arguments += "-DisablePlugins=$DisablePlugins"
+        }
         if (-not $CaptureScreenshots) {
             $Arguments += '-MBSTSkipScreenshots'
         }
@@ -95,8 +113,14 @@ for ($RunIndex = 1; $RunIndex -le $Repetitions; ++$RunIndex) {
             -FilePath $UnrealEditor `
             -ArgumentList $Arguments `
             -PassThru `
-            -Wait `
             -WindowStyle Normal
+        try {
+            $Process.PriorityClass = 'High'
+        }
+        catch {
+            Write-Warning "Could not raise benchmark process priority: $($_.Exception.Message)"
+        }
+        $Process.WaitForExit()
         if ($Process.ExitCode -ne 0) {
             throw "Scenario '$Scenario' exited with code $($Process.ExitCode). Log: $LogPath"
         }
@@ -135,7 +159,8 @@ Get-ChildItem -LiteralPath $OutputRoot -Filter '*.json' -Recurse |
     }
 
 $SummaryRows = @()
-foreach ($Scenario in @('Actor', 'Mass', 'TurretMass')) {
+foreach ($ScenarioName in $Scenarios) {
+    $Scenario = $ScenarioFiles[$ScenarioName]
     $ScenarioRows = @($Rows | Where-Object Scenario -eq $Scenario)
     if ($ScenarioRows.Count -ne $Repetitions) {
         throw "Expected $Repetitions '$Scenario' results, found $($ScenarioRows.Count)."
@@ -155,12 +180,18 @@ foreach ($Scenario in @('Actor', 'Mass', 'TurretMass')) {
 }
 
 $Summary = [ordered]@{
-    benchmark_schema_version = 2
+    benchmark_schema_version = 3
     aggregation = 'median of independent UE process runs'
+    comparison = 'identical turret-capable MassBattleFrame AgentConfig, renderer, mesh, material, Niagara, and entity archetype'
+    feature_off_path = 'turret pack processor unregistered; whole root rotation tracks the target'
+    feature_on_path = 'fixed body root; turret state is packed to Style for GPU local transform'
     units = $Units
     repetitions = $Repetitions
     warmup_seconds = $WarmupSeconds
     sample_seconds = $SampleSeconds
+    logic_hz = $LogicHz
+    frame_spreading = $true
+    render_batch_size = $BatchSize
     resolution = '1280x720'
     rhi = 'DX12'
     vsync = $false

@@ -40,6 +40,7 @@
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Misc/Parse.h"
+#include "NiagaraComponent.h"
 #include "RenderTimer.h"
 #include "Renderers/MassBattleAgentRenderer.h"
 #include "Serialization/JsonSerializer.h"
@@ -50,6 +51,37 @@
 namespace MBSTBenchmark
 {
     static constexpr float TwoPi = 2.0f * PI;
+
+    enum class EFeatureABPath : uint8
+    {
+        Legacy,
+        RootRotation,
+        SingleTurret
+    };
+
+    static EFeatureABPath GetFeatureABPath()
+    {
+        static const EFeatureABPath Path = []
+        {
+            FString ScenarioToken;
+            if (!FParse::Value(FCommandLine::Get(), TEXT("MBSTScenario="), ScenarioToken))
+            {
+                return EFeatureABPath::SingleTurret;
+            }
+            if (ScenarioToken.Equals(TEXT("mass"), ESearchCase::IgnoreCase)
+                || ScenarioToken.Equals(TEXT("baseline"), ESearchCase::IgnoreCase))
+            {
+                return EFeatureABPath::RootRotation;
+            }
+            if (ScenarioToken.Equals(TEXT("actor"), ESearchCase::IgnoreCase)
+                || ScenarioToken.Equals(TEXT("legacy"), ESearchCase::IgnoreCase))
+            {
+                return EFeatureABPath::Legacy;
+            }
+            return EFeatureABPath::SingleTurret;
+        }();
+        return Path;
+    }
 
     // Written once by the benchmark actor before tagged entities are spawned,
     // then read by the native worker-thread processor for the rest of the run.
@@ -210,7 +242,7 @@ UMBSTSingleTurretBenchmarkDriveProcessor::UMBSTSingleTurretBenchmarkDriveProcess
     ExecutionOrder.ExecuteBefore.Add(TEXT("MBSTSingleTurretPackProcessor"));
     ExecutionOrder.ExecuteBefore.Add(TEXT("MassBattleAgentRenderProcessor"));
     ExecutionFlags = static_cast<int32>(EProcessorExecutionFlags::Client | EProcessorExecutionFlags::Server | EProcessorExecutionFlags::Standalone);
-    ProcessingPhase = EMassProcessingPhase::FrameEnd;
+    ProcessingPhase = EMassProcessingPhase::StartPhysics;
     bAutoRegisterWithProcessingPhases = true;
     bRequiresGameThreadExecution = false;
     ExecutionPriority = 6;
@@ -224,28 +256,39 @@ void UMBSTSingleTurretBenchmarkDriveProcessor::ConfigureQueries(const TSharedRef
         .All<FRotating>(MARW)
         .RegisterWithProcessor(*this);
 
-    FEntityQueryBuilder(MassBaselineQuery)
-        .All<FMBSTBenchmarkMassBaselineTag>()
-        .All<FLocating>(MARO)
-        .All<FRotating>(MARW)
-        .RegisterWithProcessor(*this);
-
-    FEntityQueryBuilder(SingleTurretQuery)
-        .All<FMBSTBenchmarkSingleTurretTag>()
-        .All<FLocating, FRotating, FScaling>(MARO)
-        .All<FMBSTSingleTurretState>(MARW)
-        .All<FMBSTSingleTurretShared>(MARO)
-        .RegisterWithProcessor(*this);
+    if (MBSTBenchmark::GetFeatureABPath() == MBSTBenchmark::EFeatureABPath::RootRotation)
+    {
+        // The feature-off process keeps the exact same turret-capable entity
+        // archetype, but replaces turret tracking with whole-root rotation.
+        FEntityQueryBuilder(MassBaselineQuery)
+            .All<FMBSTBenchmarkSingleTurretTag>()
+            .All<FLocating>(MARO)
+            .All<FRotating>(MARW)
+            .RegisterWithProcessor(*this);
+    }
+    else if (MBSTBenchmark::GetFeatureABPath() == MBSTBenchmark::EFeatureABPath::SingleTurret)
+    {
+        FEntityQueryBuilder(SingleTurretQuery)
+            .All<FMBSTBenchmarkSingleTurretTag>()
+            .All<FLocating, FRotating, FScaling>(MARO)
+            .All<FMBSTSingleTurretState>(MARW)
+            .All<FMBSTSingleTurretShared>(MARO)
+            .RegisterWithProcessor(*this);
+    }
 }
 
 void UMBSTSingleTurretBenchmarkDriveProcessor::Execute(FMassEntityManager& EntityManager, FMassExecutionContext& Context)
 {
-    if (!Context.GetWorld())
+    UMassBattleSubsystem* MassBattle = UMassBattleSubsystem::GetPtr(this);
+    if (!Context.GetWorld()
+        || !MassBattle
+        || !MassBattle->IsSubFrameScheduled(ESubFrame::Subtick3))
     {
         return;
     }
 
-    const FVector Target = MBSTBenchmark::CalculateTargetLocation(FPlatformTime::Seconds());
+    const FVector Target = MBSTBenchmark::CalculateTargetLocation(
+        MassBattle->GetSimulationTime());
 
     LegacyQuery.ForEachEntityChunk(Context, [Target](FMassExecutionContext& ChunkContext)
     {
@@ -257,15 +300,24 @@ void UMBSTSingleTurretBenchmarkDriveProcessor::Execute(FMassEntityManager& Entit
         }
     });
 
-    MassBaselineQuery.ForEachEntityChunk(Context, [Target](FMassExecutionContext& ChunkContext)
+    if (MBSTBenchmark::GetFeatureABPath() == MBSTBenchmark::EFeatureABPath::RootRotation)
     {
-        const TConstArrayView<FLocating> Locations = ChunkContext.GetFragmentView<FLocating>();
-        TArrayView<FRotating> Rotations = ChunkContext.GetMutableFragmentView<FRotating>();
-        for (int32 EntityIndex = 0; EntityIndex < ChunkContext.GetNumEntities(); ++EntityIndex)
+        MassBaselineQuery.ForEachEntityChunk(Context, [Target](FMassExecutionContext& ChunkContext)
         {
-            MBSTBenchmark::ForceWorldYaw(Rotations[EntityIndex], Locations[EntityIndex].Location, Target);
-        }
-    });
+            const TConstArrayView<FLocating> Locations = ChunkContext.GetFragmentView<FLocating>();
+            TArrayView<FRotating> Rotations = ChunkContext.GetMutableFragmentView<FRotating>();
+            for (int32 EntityIndex = 0; EntityIndex < ChunkContext.GetNumEntities(); ++EntityIndex)
+            {
+                MBSTBenchmark::ForceWorldYaw(Rotations[EntityIndex], Locations[EntityIndex].Location, Target);
+            }
+        });
+        return;
+    }
+
+    if (MBSTBenchmark::GetFeatureABPath() != MBSTBenchmark::EFeatureABPath::SingleTurret)
+    {
+        return;
+    }
 
     SingleTurretQuery.ForEachEntityChunk(Context, [Target](FMassExecutionContext& ChunkContext)
     {
@@ -337,6 +389,8 @@ void AMBSTSingleTurretBenchmarkActor::BeginPlay()
     UnitCount = FMath::Max(UnitCount, 1);
     WarmupSeconds = FMath::Max(WarmupSeconds, 0.0f);
     SampleSeconds = FMath::Max(SampleSeconds, 1.0f);
+    LogicHz = FMath::Clamp(LogicHz, 1.0f, 60.0f);
+    RenderBatchSize = FMath::Max(RenderBatchSize, 1);
     LegacyActorsPerFrame = FMath::Max(LegacyActorsPerFrame, 1);
     TargetOrbitRadius = FMath::Max(TargetOrbitRadius, 100.0f);
     TargetOrbitPeriodSeconds = FMath::Max(TargetOrbitPeriodSeconds, 1.0f);
@@ -348,6 +402,20 @@ void AMBSTSingleTurretBenchmarkActor::BeginPlay()
     MBSTBenchmark::RuntimeTargetHeight = TargetHeight;
     MBSTBenchmark::bRuntimeUseFixedTargetBearing = bUseFixedTargetBearing;
     MBSTBenchmark::RuntimeFixedTargetBearingDegrees = FixedTargetBearingDegrees;
+
+    if (UMassBattleSubsystem* MassBattle = UMassBattleSubsystem::GetPtr(this))
+    {
+        MassBattle->SetSimConfig(
+            1.0f / LogicHz,
+            0.0f,
+            bUseFrameSpreading,
+            false,
+            false);
+        UE_LOG(LogTemp, Display,
+            TEXT("MBST_BENCHMARK_SIM_PROFILE: logic_hz=%.2f frame_spreading=%d"),
+            LogicHz,
+            bUseFrameSpreading ? 1 : 0);
+    }
 
     FormationWidth = FMath::Max(1, FMath::CeilToInt(FMath::Sqrt(static_cast<float>(UnitCount))));
     FormationDepth = FMath::Max(1, FMath::CeilToInt(static_cast<float>(UnitCount) / static_cast<float>(FormationWidth)));
@@ -371,6 +439,8 @@ void AMBSTSingleTurretBenchmarkActor::ApplyCommandLineOverrides()
     FParse::Value(CommandLine, TEXT("MBSTTanksPerSide="), UnitCount);
     FParse::Value(CommandLine, TEXT("MBSTWarmup="), WarmupSeconds);
     FParse::Value(CommandLine, TEXT("MBSTSample="), SampleSeconds);
+    FParse::Value(CommandLine, TEXT("MBSTLogicHz="), LogicHz);
+    FParse::Value(CommandLine, TEXT("MBSTBatchSize="), RenderBatchSize);
     FParse::Value(CommandLine, TEXT("MBSTLegacySpawnPerFrame="), LegacyActorsPerFrame);
     FParse::Value(CommandLine, TEXT("MBSTTargetRadius="), TargetOrbitRadius);
     FParse::Value(CommandLine, TEXT("MBSTTargetPeriod="), TargetOrbitPeriodSeconds);
@@ -411,6 +481,9 @@ void AMBSTSingleTurretBenchmarkActor::ApplyCommandLineOverrides()
     bDoNotExit = FParse::Param(CommandLine, TEXT("MBSTNoExit"));
     bTopDownAimProof = bTopDownAimProof || FParse::Param(CommandLine, TEXT("MBSTTopDownAimProof"));
     bFreeObservation = bFreeObservation || FParse::Param(CommandLine, TEXT("MBSTFreeObserve"));
+    bUseFrameSpreading = bUseFrameSpreading
+        && !FParse::Param(CommandLine, TEXT("MBSTNoFrameSpreading"));
+    bProfileGPUAtSampling = FParse::Param(CommandLine, TEXT("MBSTProfileGPU"));
 }
 
 void AMBSTSingleTurretBenchmarkActor::CreateBenchmarkEnvironment()
@@ -432,7 +505,9 @@ void AMBSTSingleTurretBenchmarkActor::CreateBenchmarkEnvironment()
         AStaticMeshActor* Floor = World->SpawnActor<AStaticMeshActor>(FVector(0.0, 0.0, -10.0), FRotator::ZeroRotator);
         if (Floor)
         {
+#if WITH_EDITOR
             Floor->SetActorLabel(TEXT("MBST_NativeBenchmarkFloor"));
+#endif
             Floor->GetStaticMeshComponent()->SetStaticMesh(Cube);
             Floor->GetStaticMeshComponent()->SetMobility(EComponentMobility::Movable);
             Floor->GetStaticMeshComponent()->SetCollisionEnabled(ECollisionEnabled::NoCollision);
@@ -527,6 +602,34 @@ bool AMBSTSingleTurretBenchmarkActor::LoadScenarioAssets()
         return false;
     }
 
+    if (UClass* RendererClass = SingleTurretConfig->Visualize.RendererClass.LoadSynchronous())
+    {
+        if (AMassBattleAgentRenderer* RendererCDO =
+            RendererClass->GetDefaultObject<AMassBattleAgentRenderer>())
+        {
+            RendererCDO->RenderBatchSize = RenderBatchSize;
+            const UStaticMesh* Mesh = RendererCDO->AgentMesh;
+            FString LODTriangles;
+            if (Mesh)
+            {
+                for (int32 LODIndex = 0; LODIndex < Mesh->GetNumLODs(); ++LODIndex)
+                {
+                    if (LODIndex > 0)
+                    {
+                        LODTriangles += TEXT(",");
+                    }
+                    LODTriangles += FString::FromInt(Mesh->GetNumTriangles(LODIndex));
+                }
+            }
+            UE_LOG(LogTemp, Display,
+                TEXT("MBST_RENDER_PROFILE: batch_size=%d mesh=%s lods=%d triangles=[%s]"),
+                RenderBatchSize,
+                Mesh ? *Mesh->GetPathName() : TEXT("None"),
+                Mesh ? Mesh->GetNumLODs() : 0,
+                *LODTriangles);
+        }
+    }
+
     if (Scenario == EMBSTBenchmarkScenario::LegacyCompound)
     {
         LegacyTankClass = StaticLoadClass(
@@ -585,7 +688,9 @@ bool AMBSTSingleTurretBenchmarkActor::SpawnMovingTarget()
         MovingTargetVisual = World->SpawnActor<AStaticMeshActor>(TargetLocation, FRotator::ZeroRotator);
         if (MovingTargetVisual)
         {
+#if WITH_EDITOR
             MovingTargetVisual->SetActorLabel(TEXT("MBST_HighHealthMovingSandbag"));
+#endif
             MovingTargetVisual->GetStaticMeshComponent()->SetStaticMesh(Cylinder);
             MovingTargetVisual->GetStaticMeshComponent()->SetMobility(EComponentMobility::Movable);
             MovingTargetVisual->GetStaticMeshComponent()->SetCollisionEnabled(ECollisionEnabled::NoCollision);
@@ -675,10 +780,17 @@ void AMBSTSingleTurretBenchmarkActor::BeginSpawning()
 
 void AMBSTSingleTurretBenchmarkActor::SpawnMassScenario(const bool bSingleTurret)
 {
+    UE_LOG(LogTemp, Display,
+        TEXT("MBST_FEATURE_AB: turret_feature=%s template=identical root_path=%s."),
+        bSingleTurret ? TEXT("enabled") : TEXT("disabled"),
+        bSingleTurret ? TEXT("fixed_body_plus_style") : TEXT("whole_root_rotation"));
+
+    // Both feature states deliberately use the complete turret-capable
+    // template. The only A/B variable is which tracking processor path runs.
     const FEntityTemplateData Template = MBSTBenchmark::MakeMassTemplate(
         this,
         SingleTurretConfig,
-        bSingleTurret,
+        true,
         true);
     if (!Template.IsValid())
     {
@@ -709,7 +821,7 @@ void AMBSTSingleTurretBenchmarkActor::SpawnMassScenario(const bool bSingleTurret
 
     for (const FEntityHandle& Handle : Handles)
     {
-        ConfigureControlledEntity(Handle, false, !bSingleTurret, bSingleTurret, true, 1);
+        ConfigureControlledEntity(Handle, false, false, true, true, 1);
     }
     SpawnedTankCount = Handles.Num();
     SpawnedUnitEntityCount = Handles.Num();
@@ -904,8 +1016,50 @@ void AMBSTSingleTurretBenchmarkActor::EnterWarmup()
         *GetScenarioLabel(), SpawnedTankCount, SpawnedUnitEntityCount, TargetHealth, TargetOrbitRadius);
 }
 
+bool AMBSTSingleTurretBenchmarkActor::ValidateRenderPopulation(const TCHAR* Stage) const
+{
+    int32 RendererCount = 0;
+    int32 TotalBatches = 0;
+    int32 TotalInstances = 0;
+    if (const UMassBattleSubsystem* BattleSubsystem = UMassBattleSubsystem::GetPtr(this))
+    {
+        RendererCount = BattleSubsystem->AgentRenderers.Num();
+        for (const TPair<int32, TObjectPtr<AMassBattleAgentRenderer>>& Pair : BattleSubsystem->AgentRenderers)
+        {
+            if (const AMassBattleAgentRenderer* Renderer = Pair.Value.Get())
+            {
+                TotalBatches += Renderer->SpawnedRenderBatches.Num();
+                for (const TPair<int32, FAgentRenderBatchData>& BatchPair : Renderer->SpawnedRenderBatches)
+                {
+                    TotalInstances += BatchPair.Value.LocationArray.Num();
+                }
+            }
+        }
+    }
+
+    const bool bRequiresMassRenderer = Scenario != EMBSTBenchmarkScenario::LegacyCompound;
+    const bool bValid = !bRequiresMassRenderer
+        || (RendererCount > 0 && TotalBatches > 0 && TotalInstances == UnitCount);
+    UE_LOG(LogTemp, Display,
+        TEXT("MBST_RENDER_ASSERT: stage=%s valid=%d renderers=%d batches=%d instances=%d expected=%d"),
+        Stage,
+        bValid ? 1 : 0,
+        RendererCount,
+        TotalBatches,
+        TotalInstances,
+        bRequiresMassRenderer ? UnitCount : 0);
+    return bValid;
+}
+
 void AMBSTSingleTurretBenchmarkActor::EnterSampling()
 {
+    if (!ValidateRenderPopulation(TEXT("sample_begin")))
+    {
+        Phase = EMBSTBenchmarkPhase::Failed;
+        FPlatformMisc::RequestExit(true);
+        return;
+    }
+
     Phase = EMBSTBenchmarkPhase::Sampling;
     PhaseElapsedSeconds = 0.0f;
     FrameTimeSamplesMilliseconds.Reset();
@@ -919,13 +1073,23 @@ void AMBSTSingleTurretBenchmarkActor::EnterSampling()
     GPUSamplesMilliseconds.Reserve(ReserveCount);
     SetCloseCamera(false);
     UE_LOG(LogTemp, Display, TEXT("MBST_BENCHMARK_SAMPLE_BEGIN: %s"), *GetScenarioLabel());
+    if (bProfileGPUAtSampling && GEngine)
+    {
+        GEngine->Exec(GetWorld(), TEXT("r.ProfileGPU.ShowUI 0"));
+        GEngine->Exec(GetWorld(), TEXT("r.ProfileGPU.ThresholdPercent 0"));
+        GEngine->Exec(GetWorld(), TEXT("r.ProfileGPU.ShowLeafEvents 1"));
+        GEngine->Exec(GetWorld(), TEXT("ProfileGPU"));
+        UE_LOG(LogTemp, Display, TEXT("MBST_PROFILE_GPU_TRIGGERED"));
+    }
 }
 
 void AMBSTSingleTurretBenchmarkActor::FinishSampling()
 {
-    if (FrameTimeSamplesMilliseconds.IsEmpty())
+    if (FrameTimeSamplesMilliseconds.IsEmpty()
+        || !ValidateRenderPopulation(TEXT("sample_end")))
     {
         Phase = EMBSTBenchmarkPhase::Failed;
+        FPlatformMisc::RequestExit(true);
         return;
     }
 
@@ -989,25 +1153,7 @@ void AMBSTSingleTurretBenchmarkActor::Tick(const float DeltaSeconds)
         if (!bRenderDiagnosticsLogged && PhaseElapsedSeconds >= 2.0f)
         {
             bRenderDiagnosticsLogged = true;
-            if (UMassBattleSubsystem* BattleSubsystem = UMassBattleSubsystem::GetPtr(this))
-            {
-                int32 TotalBatches = 0;
-                int32 TotalInstances = 0;
-                for (const TPair<int32, TObjectPtr<AMassBattleAgentRenderer>>& Pair : BattleSubsystem->AgentRenderers)
-                {
-                    if (const AMassBattleAgentRenderer* Renderer = Pair.Value.Get())
-                    {
-                        TotalBatches += Renderer->SpawnedRenderBatches.Num();
-                        for (const TPair<int32, FAgentRenderBatchData>& BatchPair : Renderer->SpawnedRenderBatches)
-                        {
-                            TotalInstances += BatchPair.Value.LocationArray.Num();
-                        }
-                    }
-                }
-                UE_LOG(LogTemp, Display,
-                    TEXT("MBST_RENDER_DIAGNOSTIC: renderers=%d batches=%d instances=%d"),
-                    BattleSubsystem->AgentRenderers.Num(), TotalBatches, TotalInstances);
-            }
+            ValidateRenderPopulation(TEXT("warmup"));
         }
 
         if (!bSkipScreenshots && PendingScreenshotFrames == 0 && !bWideCaptured && PhaseElapsedSeconds >= 2.0f)
@@ -1155,6 +1301,13 @@ void AMBSTSingleTurretBenchmarkActor::WriteResultJson()
     Root->SetStringField(TEXT("timing_source"), TEXT("UE GGameThreadTime + GRenderThreadTime + RHIGetGPUFrameCycles + platform wall frame interval"));
     Root->SetStringField(TEXT("unit_update_path"), TEXT("native Mass processor; no Blueprint Tick and no Python timing"));
     Root->SetBoolField(TEXT("separate_process_per_scenario"), true);
+    Root->SetBoolField(TEXT("turret_feature_enabled"), Scenario == EMBSTBenchmarkScenario::SingleTurret);
+    Root->SetBoolField(TEXT("ab_identical_agent_template"), Scenario != EMBSTBenchmarkScenario::LegacyCompound);
+    Root->SetStringField(
+        TEXT("ab_tracking_path"),
+        Scenario == EMBSTBenchmarkScenario::SingleTurret
+            ? TEXT("fixed body root; turret state packed to Style for GPU local transform")
+            : TEXT("turret feature disabled; whole body root rotation tracks target"));
     Root->SetBoolField(TEXT("source_weapon_logic_disabled"), true);
     Root->SetStringField(TEXT("reason_weapon_logic_disabled"), TEXT("isolates representation, tracking processor and rendering cost from projectile/FX variance"));
     Root->SetNumberField(TEXT("requested_units"), UnitCount);
@@ -1164,6 +1317,9 @@ void AMBSTSingleTurretBenchmarkActor::WriteResultJson()
     Root->SetNumberField(TEXT("mass_entities_per_tank"), Scenario == EMBSTBenchmarkScenario::LegacyCompound ? 4 : 1);
     Root->SetNumberField(TEXT("warmup_seconds"), WarmupSeconds);
     Root->SetNumberField(TEXT("requested_sample_seconds"), SampleSeconds);
+    Root->SetNumberField(TEXT("logic_hz"), LogicHz);
+    Root->SetBoolField(TEXT("frame_spreading"), bUseFrameSpreading);
+    Root->SetNumberField(TEXT("render_batch_size"), RenderBatchSize);
     Root->SetNumberField(TEXT("average_fps"), FrameStats.Average > 0.0f ? 1000.0f / FrameStats.Average : 0.0f);
     Root->SetBoolField(TEXT("gpu_timing_available"), GPUStats.Count > 0);
 

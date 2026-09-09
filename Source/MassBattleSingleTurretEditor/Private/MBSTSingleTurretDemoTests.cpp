@@ -16,15 +16,18 @@
 #include "GameFramework/Actor.h"
 #include "Fragments/Team.h"
 #include "HAL/PlatformTime.h"
+#include "Materials/Material.h"
 #include "MeshDescription.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
 #include "Misc/ScopeExit.h"
+#include "NiagaraMeshRendererProperties.h"
 #include "NiagaraSystem.h"
 #include "StaticMeshAttributes.h"
 #include "Subsystems/EditorAssetSubsystem.h"
 #include "UObject/GarbageCollection.h"
+#include "UObject/UObjectIterator.h"
 #include "Editor.h"
 #include "FileHelpers.h"
 #include "GameFramework/WorldSettings.h"
@@ -1028,77 +1031,122 @@ bool FMBSTConfigureDemoNiagaraTest::RunTest(const FString& Parameters)
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FMBSTConfigureDemoPrecomputedArticulationTest,
+    "MassBattle.SingleTurret.Authoring.ConfigureDemoPrecomputedArticulation",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMBSTConfigureDemoPrecomputedArticulationTest::RunTest(const FString& Parameters)
+{
+    UNiagaraSystem* NiagaraSystem = LoadObject<UNiagaraSystem>(
+        nullptr,
+        TEXT("/MassBattleSingleTurret/Demo/Tank/NS_Tank_SingleTurret.NS_Tank_SingleTurret"));
+    UMaterial* Material = LoadObject<UMaterial>(
+        nullptr,
+        TEXT("/MassBattleSingleTurret/Materials/M_MBST_VATSingleTurret.M_MBST_VATSingleTurret"));
+    if (!TestNotNull(TEXT("Single-turret demo Niagara system"), NiagaraSystem)
+        || !TestNotNull(TEXT("Single-turret base material"), Material))
+    {
+        return false;
+    }
+
+    FString NiagaraMessage;
+    const bool bNiagaraConfigured =
+        UMBSTSingleTurretEditorLibrary::ConfigureNiagaraPrecomputedArticulation(
+            NiagaraSystem,
+            NiagaraMessage);
+    AddInfo(NiagaraMessage);
+    TestTrue(TEXT("Moved packed decode and trigonometry to the GPU particle stage"), bNiagaraConfigured);
+
+    FString MaterialMessage;
+    const bool bMaterialConfigured =
+        UMBSTSingleTurretEditorLibrary::ConfigurePrecomputedArticulationMaterial(
+            Material,
+            MaterialMessage);
+    AddInfo(MaterialMessage);
+    TestTrue(TEXT("Removed packed decode and trigonometry from the material vertex path"), bMaterialConfigured);
+
+    FString NormalSwitchMessage;
+    const bool bNormalSwitchConfigured =
+        UMBSTSingleTurretEditorLibrary::ConfigurePerformanceNormalSwitch(
+            Material,
+            NormalSwitchMessage);
+    AddInfo(NormalSwitchMessage);
+    TestTrue(TEXT("Default material permutation removes articulated pixel-normal rotation"), bNormalSwitchConfigured);
+
+    UEditorAssetSubsystem* AssetSubsystem = GEditor->GetEditorSubsystem<UEditorAssetSubsystem>();
+    const bool bSaved = TestNotNull(TEXT("Editor asset subsystem"), AssetSubsystem)
+        && AssetSubsystem->SaveLoadedAsset(NiagaraSystem, false)
+        && AssetSubsystem->SaveLoadedAsset(Material, false);
+    TestTrue(TEXT("Saved precomputed articulation assets"), bSaved);
+    return bNiagaraConfigured && bMaterialConfigured && bNormalSwitchConfigured && bSaved;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
     FMBSTDemoStructurePerformanceTest,
     "MassBattle.SingleTurret.Performance.DemoTankStructure",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FMBSTDemoStructurePerformanceTest::RunTest(const FString& Parameters)
 {
-    UBlueprint* LegacyTankBlueprint = LoadObject<UBlueprint>(
-        nullptr,
-        TEXT("/MassBattle/Test/CompoundUnitAsset/BP_TankActor.BP_TankActor"));
     UStaticMesh* SingleTurretMesh = LoadObject<UStaticMesh>(
         nullptr,
         TEXT("/MassBattleSingleTurret/Demo/Tank/Tank_SingleTurret.Tank_SingleTurret"));
     UMassBattleAgentConfigDataAsset* SingleTurretConfig = LoadObject<UMassBattleAgentConfigDataAsset>(
         nullptr,
         TEXT("/MassBattleSingleTurret/Demo/Tank/Tank_SingleTurret_AgentConfig.Tank_SingleTurret_AgentConfig"));
-    UWorld* EditorWorld = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+    UNiagaraSystem* NiagaraSystem = LoadObject<UNiagaraSystem>(
+        nullptr,
+        TEXT("/MassBattleSingleTurret/Demo/Tank/NS_Tank_SingleTurret.NS_Tank_SingleTurret"));
 
-    if (!TestNotNull(TEXT("Legacy compound tank Blueprint"), LegacyTankBlueprint)
-        || !TestNotNull(TEXT("Generated single-turret mesh"), SingleTurretMesh)
+    if (!TestNotNull(TEXT("Generated single-turret mesh"), SingleTurretMesh)
         || !TestNotNull(TEXT("Generated single-turret AgentConfig"), SingleTurretConfig)
-        || !TestNotNull(TEXT("Editor world"), EditorWorld)
-        || !TestNotNull(TEXT("Legacy compound tank generated class"),
-            LegacyTankBlueprint ? LegacyTankBlueprint->GeneratedClass.Get() : nullptr))
+        || !TestNotNull(TEXT("Configured single-turret Niagara system"), NiagaraSystem))
     {
         return false;
-    }
-
-    FActorSpawnParameters SpawnParameters;
-    SpawnParameters.Name = TEXT("MBST_DemoTankStructureSource");
-    SpawnParameters.ObjectFlags = RF_Transient | RF_Transactional;
-    SpawnParameters.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-    AActor* LegacyTankInstance = EditorWorld->SpawnActor<AActor>(
-        LegacyTankBlueprint->GeneratedClass,
-        FTransform::Identity,
-        SpawnParameters);
-    if (!TestNotNull(TEXT("Transient legacy compound tank instance"), LegacyTankInstance))
-    {
-        return false;
-    }
-    ON_SCOPE_EXIT
-    {
-        if (IsValid(LegacyTankInstance))
-        {
-            EditorWorld->DestroyActor(LegacyTankInstance);
-        }
-    };
-
-    TInlineComponentArray<UActorComponent*> LegacyComponents(LegacyTankInstance);
-    int32 LegacyAgentComponentCount = 0;
-    for (const UActorComponent* Component : LegacyComponents)
-    {
-        if (Component && Component->GetClass()->GetName() == TEXT("MassBattleAgentComponent"))
-        {
-            ++LegacyAgentComponentCount;
-        }
     }
 
     const FMBSTAssetValidationResult ContractValidation =
         UMBSTSingleTurretEditorLibrary::ValidateAgentConfigSingleTurret(SingleTurretConfig, nullptr);
+    int32 AgentMeshLODSlotCount = 0;
+    bool bAgentMeshLODSlotsPreserveABI = true;
+    ForEachObjectWithPackage(NiagaraSystem->GetOutermost(), [&](UObject* Object)
+    {
+        const UNiagaraMeshRendererProperties* MeshRenderer =
+            Cast<UNiagaraMeshRendererProperties>(Object);
+        if (!MeshRenderer)
+        {
+            return true;
+        }
+        for (int32 MeshIndex = 0; MeshIndex < MeshRenderer->Meshes.Num(); ++MeshIndex)
+        {
+            const FNiagaraMeshRendererMeshProperties& MeshProperties =
+                MeshRenderer->Meshes[MeshIndex];
+            if (MeshProperties.MeshParameterBinding.ResolvedParameter.GetName()
+                != FName(TEXT("User.AgentMesh")))
+            {
+                continue;
+            }
+            ++AgentMeshLODSlotCount;
+            bAgentMeshLODSlotsPreserveABI = bAgentMeshLODSlotsPreserveABI
+                && MeshProperties.LODMode == ENiagaraMeshLODMode::LODLevel
+                && MeshProperties.LODLevel == MeshIndex
+                && MeshProperties.LODLevelBinding.GetDefaultValue<int32>() == MeshIndex;
+        }
+        return true;
+    });
     TestTrue(TEXT("Single-turret config carries the direct Mass entity contract"), ContractValidation.bValid);
-    TestEqual(TEXT("Legacy demo tank MassBattleAgentComponent count"), LegacyAgentComponentCount, 4);
     TestEqual(TEXT("Generated tank merged mesh LOD count"), SingleTurretMesh->GetNumLODs(), 3);
+    TestEqual(TEXT("MassBattle User.AgentMesh LOD slot count"), AgentMeshLODSlotCount, 5);
+    TestTrue(TEXT("MassBattle User.AgentMesh slots preserve LOD 0..N ABI"), bAgentMeshLODSlotsPreserveABI);
 
     AddInfo(FString::Printf(
-        TEXT("Structural baseline: legacy BP_TankActor=%d Mass agent components; plugin tank=1 Mass entity. Entity-count reduction=%.0f%%."),
-        LegacyAgentComponentCount,
-        LegacyAgentComponentCount > 0
-            ? (1.0 - 1.0 / static_cast<double>(LegacyAgentComponentCount)) * 100.0
-            : 0.0));
-    AddInfo(TEXT("This is a structural comparison, not an FPS/GPU timing claim."));
-    return ContractValidation.bValid && LegacyAgentComponentCount == 4 && SingleTurretMesh->GetNumLODs() == 3;
+        TEXT("Plugin tank validates as one direct Mass entity; authored mesh MinLOD remains %d."),
+        SingleTurretMesh->GetMinLODIdx()));
+    AddInfo(TEXT("The external MassBattle compound demo is intentionally not loaded by this plugin test."));
+    return ContractValidation.bValid
+        && SingleTurretMesh->GetNumLODs() == 3
+        && AgentMeshLODSlotCount == 5
+        && bAgentMeshLODSlotsPreserveABI;
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(

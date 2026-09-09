@@ -23,7 +23,7 @@ private:
 };
 
 
-/** Restores the original movement stop bit immediately after the MassBattle move pass. */
+/** Restores the original movement stop bit at FrameEnd, after the MassBattle move pass. */
 UCLASS()
 class MASSBATTLESINGLETURRETRUNTIME_API UMBSTMobileFireMovementGateRestoreProcessor : public UMassProcessor
 {
@@ -41,8 +41,10 @@ private:
 };
 
 /**
- * Uses the latest TraceResult after movement/trace/behavior, drives the CPU turret
- * state, evaluates the three mobility policies, and emits exactly one request per shot.
+ * Uses the previous completed TraceResult at the Combat sub-frame, drives the CPU
+ * turret state, packs its render sample, evaluates the three mobility policies, and
+ * emits exactly one request per shot. MassBattleFrame exposes no plugin hook inside
+ * its manually-dispatched same-tick Trace/Behavior/Render chain.
  */
 UCLASS()
 class MASSBATTLESINGLETURRETRUNTIME_API UMBSTMobileFireCombatProcessor : public UMassProcessor

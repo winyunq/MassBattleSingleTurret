@@ -4,10 +4,12 @@
 #include "MBSTMobileFireProfile.h"
 #include "MBSTSingleTurretAsset.h"
 #include "MBSTSingleTurretAuthoringComponent.h"
+#include "MBSTSingleTurretRenderer.h"
 #include "MBSTSingleTurretTypes.h"
 
 #include "AnimToTextureBPLibrary.h"
 #include "AnimToTextureDataAsset.h"
+#include "Animation/AnimationAsset.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Components/ChildActorComponent.h"
 #include "Components/InstancedStaticMeshComponent.h"
@@ -24,8 +26,12 @@
 #include "Materials/Material.h"
 #include "Materials/MaterialAttributeDefinitionMap.h"
 #include "Materials/MaterialExpressionCustom.h"
+#include "Materials/MaterialExpressionDynamicParameter.h"
 #include "Materials/MaterialExpressionSetMaterialAttributes.h"
+#include "Materials/MaterialExpressionStaticSwitchParameter.h"
 #include "Materials/MaterialExpressionTransform.h"
+#include "Materials/MaterialExpressionVertexNormalWS.h"
+#include "Materials/MaterialInterface.h"
 #include "Materials/MaterialInstanceConstant.h"
 #include "MeshDescription.h"
 #include "MeshUtilities.h"
@@ -34,6 +40,9 @@
 #include "Misc/ScopeExit.h"
 #include "Modules/ModuleManager.h"
 #include "NiagaraDataInterfaceArrayInt.h"
+#include "NiagaraGraph.h"
+#include "NiagaraMeshRendererProperties.h"
+#include "NiagaraNodeCustomHlsl.h"
 #include "NiagaraSystem.h"
 #include "NiagaraTypes.h"
 #include "Renderers/MassBattleAgentRenderer.h"
@@ -42,6 +51,7 @@
 #include "StructUtils/InstancedStruct.h"
 #include "UObject/Package.h"
 #include "UObject/UnrealType.h"
+#include "UObject/UObjectIterator.h"
 
 namespace MBSTEditorPrivate
 {
@@ -65,7 +75,7 @@ namespace MBSTEditorPrivate
         Result.TrimStartAndEndInline();
         Result.ReplaceInline(TEXT(" "), TEXT("_"));
         Result.ReplaceInline(TEXT("/"), TEXT("_"));
-        Result.ReplaceInline(TEXT("\\"), TEXT("_"));
+        Result.ReplaceInline(TEXT("\x5C"), TEXT("_"));
         Result.ReplaceInline(TEXT("."), TEXT("_"));
         Result.ReplaceInline(TEXT(":"), TEXT("_"));
         Result.ReplaceInline(TEXT("*"), TEXT("_"));
@@ -81,7 +91,7 @@ namespace MBSTEditorPrivate
     {
         FString Result = InPath;
         Result.TrimStartAndEndInline();
-        Result.ReplaceInline(TEXT("\\"), TEXT("/"));
+        Result.ReplaceInline(TEXT("\x5C"), TEXT("/"));
         while (Result.EndsWith(TEXT("/")))
         {
             Result.LeftChopInline(1);
@@ -943,6 +953,68 @@ namespace MBSTEditorPrivate
     }
 }
 
+UMBSTSingleTurretAuthoringComponent* UMBSTSingleTurretEditorLibrary::AddTransientAuthoringComponent(
+    AActor* SourceActor,
+    FString& OutMessage)
+{
+    OutMessage.Reset();
+    if (!IsValid(SourceActor))
+    {
+        OutMessage = TEXT("SourceActor is invalid.");
+        return nullptr;
+    }
+
+    UMBSTSingleTurretAuthoringComponent* Authoring = NewObject<UMBSTSingleTurretAuthoringComponent>(
+        SourceActor,
+        NAME_None,
+        RF_Transient);
+    if (!IsValid(Authoring))
+    {
+        OutMessage = TEXT("Could not allocate the transient authoring component.");
+        return nullptr;
+    }
+
+    SourceActor->AddInstanceComponent(Authoring);
+    Authoring->RegisterComponent();
+    OutMessage = TEXT("Registered a transient single-turret authoring component.");
+    return Authoring;
+}
+
+bool UMBSTSingleTurretEditorLibrary::PrepareSkeletalComponentPoseForConversion(
+    USkeletalMeshComponent* SkeletalComponent,
+    UAnimationAsset* Animation,
+    const float TimeSeconds,
+    FString& OutMessage)
+{
+    OutMessage.Reset();
+    if (!IsValid(SkeletalComponent) || !IsValid(SkeletalComponent->GetSkeletalMeshAsset()))
+    {
+        OutMessage = TEXT("SkeletalComponent or its skeletal mesh is invalid.");
+        return false;
+    }
+    if (!IsValid(Animation))
+    {
+        OutMessage = TEXT("Animation is invalid.");
+        return false;
+    }
+
+    SkeletalComponent->SetAnimationMode(EAnimationMode::AnimationSingleNode);
+    SkeletalComponent->SetAnimation(Animation);
+    SkeletalComponent->SetPosition(FMath::Max(TimeSeconds, 0.0f), false);
+    SkeletalComponent->TickAnimation(0.0f, false);
+    SkeletalComponent->RefreshBoneTransforms();
+    SkeletalComponent->UpdateComponentToWorld();
+    SkeletalComponent->MarkRenderTransformDirty();
+    SkeletalComponent->MarkRenderDynamicDataDirty();
+
+    OutMessage = FString::Printf(
+        TEXT("Prepared '%s' at %.3f seconds using '%s'."),
+        *SkeletalComponent->GetName(),
+        FMath::Max(TimeSeconds, 0.0f),
+        *Animation->GetPathName());
+    return true;
+}
+
 FMBSTActorToSingleTurretResult UMBSTSingleTurretEditorLibrary::ConvertActorToSingleTurretVAT(
     AActor* SourceActor,
     UMBSTSingleTurretAuthoringComponent* Authoring,
@@ -1267,6 +1339,174 @@ FMBSTActorToSingleTurretResult UMBSTSingleTurretEditorLibrary::ConvertActorToSin
     return Result;
 }
 
+FMBSTActorToSingleTurretResult UMBSTSingleTurretEditorLibrary::ConvertStaticMeshesToSingleTurret(
+    UStaticMesh* BodyMesh,
+    UStaticMesh* TurretMesh,
+    UStaticMesh* BarrelMesh,
+    UMaterialInterface* MaterialOverride,
+    const FVector TurretPivotObjectSpace,
+    const FVector BarrelPivotObjectSpace,
+    const FVector MuzzleObjectSpace,
+    const float MaximumRecoilDistance,
+    const float YawSpeedDegreesPerSecond,
+    const float PitchSpeedDegreesPerSecond,
+    const FString& PackagePath,
+    const FString& AssetName,
+    const FMBSTActorToSingleTurretSettings& Settings)
+{
+    FMBSTActorToSingleTurretResult Failure;
+    if (!IsValid(BodyMesh) || !IsValid(TurretMesh))
+    {
+        Failure.Messages.Add(TEXT("BodyMesh and TurretMesh are required."));
+        return Failure;
+    }
+
+    UWorld* EditorWorld = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+    if (!EditorWorld)
+    {
+        Failure.Messages.Add(TEXT("No editor world is available for transient mechanical-unit assembly."));
+        return Failure;
+    }
+
+    FActorSpawnParameters SpawnParameters;
+    SpawnParameters.Name = MakeUniqueObjectName(
+        EditorWorld,
+        AActor::StaticClass(),
+        TEXT("MBST_StaticMeshAuthoringSource"));
+    SpawnParameters.ObjectFlags = RF_Transient | RF_Transactional;
+    SpawnParameters.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+    AActor* SourceActor = EditorWorld->SpawnActor<AActor>(
+        AActor::StaticClass(),
+        FTransform::Identity,
+        SpawnParameters);
+    if (!SourceActor)
+    {
+        Failure.Messages.Add(TEXT("Could not spawn the transient mechanical-unit authoring actor."));
+        return Failure;
+    }
+    ON_SCOPE_EXIT
+    {
+        if (IsValid(SourceActor))
+        {
+            EditorWorld->DestroyActor(SourceActor);
+        }
+    };
+
+    auto AddSceneComponent = [SourceActor](
+        const FName Name,
+        USceneComponent* Parent,
+        const FVector& RelativeLocation)
+    {
+        USceneComponent* Component = NewObject<USceneComponent>(
+            SourceActor,
+            Name,
+            RF_Transient | RF_Transactional);
+        SourceActor->AddInstanceComponent(Component);
+        if (Parent)
+        {
+            Component->SetupAttachment(Parent);
+            Component->SetRelativeLocation(RelativeLocation);
+        }
+        else
+        {
+            SourceActor->SetRootComponent(Component);
+        }
+        Component->RegisterComponent();
+        return Component;
+    };
+
+    auto AddMeshComponent = [SourceActor, MaterialOverride](
+        const FName Name,
+        USceneComponent* Parent,
+        UStaticMesh* Mesh,
+        const FVector& RelativeLocation)
+    {
+        UStaticMeshComponent* Component = NewObject<UStaticMeshComponent>(
+            SourceActor,
+            Name,
+            RF_Transient | RF_Transactional);
+        SourceActor->AddInstanceComponent(Component);
+        Component->SetupAttachment(Parent);
+        Component->SetRelativeLocation(RelativeLocation);
+        Component->SetStaticMesh(Mesh);
+        if (IsValid(MaterialOverride))
+        {
+            for (int32 MaterialIndex = 0; MaterialIndex < Mesh->GetStaticMaterials().Num(); ++MaterialIndex)
+            {
+                Component->SetMaterial(MaterialIndex, MaterialOverride);
+            }
+        }
+        Component->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+        Component->SetVisibility(true, false);
+        Component->SetHiddenInGame(false, false);
+        Component->RegisterComponent();
+        return Component;
+    };
+
+    USceneComponent* Root = AddSceneComponent(TEXT("MechanicalRoot"), nullptr, FVector::ZeroVector);
+    AddMeshComponent(TEXT("BodyMesh"), Root, BodyMesh, FVector::ZeroVector);
+
+    USceneComponent* TurretPivot = AddSceneComponent(
+        TEXT("TurretYawPivot"),
+        Root,
+        TurretPivotObjectSpace);
+    AddMeshComponent(
+        TEXT("TurretMesh"),
+        TurretPivot,
+        TurretMesh,
+        -TurretPivotObjectSpace);
+
+    USceneComponent* BarrelPivot = nullptr;
+    if (IsValid(BarrelMesh))
+    {
+        BarrelPivot = AddSceneComponent(
+            TEXT("BarrelPitchPivot"),
+            TurretPivot,
+            BarrelPivotObjectSpace - TurretPivotObjectSpace);
+        AddMeshComponent(
+            TEXT("BarrelMesh"),
+            BarrelPivot,
+            BarrelMesh,
+            -BarrelPivotObjectSpace);
+    }
+
+    USceneComponent* Muzzle = AddSceneComponent(
+        TEXT("Muzzle"),
+        BarrelPivot ? BarrelPivot : TurretPivot,
+        MuzzleObjectSpace - (BarrelPivot ? BarrelPivotObjectSpace : TurretPivotObjectSpace));
+
+    UMBSTSingleTurretAuthoringComponent* Authoring =
+        NewObject<UMBSTSingleTurretAuthoringComponent>(
+            SourceActor,
+            TEXT("SingleTurretAuthoring"),
+            RF_Transient | RF_Transactional);
+    SourceActor->AddInstanceComponent(Authoring);
+    Authoring->RegisterComponent();
+    Authoring->TurretYawPivot.OverrideComponent = TurretPivot;
+    Authoring->TurretYawPivot.ComponentProperty = TurretPivot->GetFName();
+    if (BarrelPivot)
+    {
+        Authoring->BarrelPitchPivot.OverrideComponent = BarrelPivot;
+        Authoring->BarrelPitchPivot.ComponentProperty = BarrelPivot->GetFName();
+    }
+    Authoring->Muzzle.OverrideComponent = Muzzle;
+    Authoring->Muzzle.ComponentProperty = Muzzle->GetFName();
+    Authoring->TurretLocalAxis = FVector::UpVector;
+    Authoring->BarrelLocalAxis = FVector::YAxisVector;
+    Authoring->BarrelLocalForwardAxis = FVector::ForwardVector;
+    Authoring->MaximumRecoilDistance = FMath::Max(MaximumRecoilDistance, 0.0f);
+    Authoring->YawSpeedDegreesPerSecond = FMath::Max(YawSpeedDegreesPerSecond, 0.0f);
+    Authoring->PitchSpeedDegreesPerSecond = FMath::Max(PitchSpeedDegreesPerSecond, 0.0f);
+    Authoring->bBodyUsesVAT = false;
+
+    return ConvertActorToSingleTurretVAT(
+        SourceActor,
+        Authoring,
+        PackagePath,
+        AssetName,
+        Settings);
+}
+
 FMBSTAssetValidationResult UMBSTSingleTurretEditorLibrary::ValidateActorForSingleTurretConversion(
     AActor* SourceActor,
     UMBSTSingleTurretAuthoringComponent* Authoring,
@@ -1470,6 +1710,221 @@ FMBSTAssetValidationResult UMBSTSingleTurretEditorLibrary::ValidateNiagaraStyleA
     return Result;
 }
 
+bool UMBSTSingleTurretEditorLibrary::ConfigureNiagaraPrecomputedArticulation(
+    UNiagaraSystem* NiagaraSystem,
+    FString& OutMessage)
+{
+    OutMessage.Reset();
+    if (!IsValid(NiagaraSystem))
+    {
+        OutMessage = TEXT("NiagaraSystem is invalid.");
+        return false;
+    }
+
+    // Custom-expression dynamic inputs are evaluated once per GPU particle.  The
+    // material receives (sin yaw, cos yaw, sin pitch, recoil); pitch is constrained
+    // to [-90, 90], so the material can reconstruct its non-negative cosine.
+    constexpr TCHAR CompactExpression[] =
+        TEXT("float4(")
+        TEXT("sin(radians(-180.0 + 360.0 * float((asuint((Particles.StyleType == 0) ? 0x08080000 : Particles.StyleType) >> 8u) & 4095u) / 4095.0)), ")
+        TEXT("cos(radians(-180.0 + 360.0 * float((asuint((Particles.StyleType == 0) ? 0x08080000 : Particles.StyleType) >> 8u) & 4095u) / 4095.0)), ")
+        TEXT("sin(radians(-90.0 + 180.0 * float((asuint((Particles.StyleType == 0) ? 0x08080000 : Particles.StyleType) >> 20u) & 255u) / 255.0)), ")
+        TEXT("float((asuint((Particles.StyleType == 0) ? 0x08080000 : Particles.StyleType) >> 28u) & 15u) / 15.0)");
+
+    int32 UpdatedNodeCount = 0;
+    TArray<FString> HlslDiagnostics;
+    TSet<UNiagaraGraph*> ModifiedGraphs;
+    FStrProperty* CustomHlslProperty = FindFProperty<FStrProperty>(
+        UNiagaraNodeCustomHlsl::StaticClass(),
+        TEXT("CustomHlsl"));
+    if (!CustomHlslProperty)
+    {
+        OutMessage = TEXT("Could not access the Niagara CustomHlsl editor property.");
+        return false;
+    }
+
+    NiagaraSystem->Modify();
+    ForEachObjectWithPackage(NiagaraSystem->GetOutermost(), [&](UObject* Object)
+    {
+        UNiagaraNodeCustomHlsl* CustomHlsl = Cast<UNiagaraNodeCustomHlsl>(Object);
+        if (!CustomHlsl)
+        {
+            return true;
+        }
+
+        FString* ExistingCode = CustomHlslProperty->ContainerPtrToValuePtr<FString>(CustomHlsl);
+        if (!ExistingCode || !ExistingCode->Contains(TEXT("Particles.StyleType")))
+        {
+            return true;
+        }
+
+        if (ExistingCode->Contains(TEXT("4095u"))
+            && ExistingCode->Contains(TEXT("sin(radians")))
+        {
+            HlslDiagnostics.Add(CustomHlsl->GetPathName());
+            ++UpdatedNodeCount;
+            return true;
+        }
+        if (!ExistingCode->Contains(TEXT("65535")))
+        {
+            return true;
+        }
+
+        CustomHlsl->Modify();
+        *ExistingCode = CompactExpression;
+        CustomHlsl->PostEditChange();
+        if (UNiagaraGraph* Graph = Cast<UNiagaraGraph>(CustomHlsl->GetGraph()))
+        {
+            Graph->Modify();
+            ModifiedGraphs.Add(Graph);
+        }
+        HlslDiagnostics.Add(CustomHlsl->GetPathName());
+        ++UpdatedNodeCount;
+        return true;
+    });
+
+    if (UpdatedNodeCount != 2)
+    {
+        OutMessage = FString::Printf(
+            TEXT("Expected the Spawn and Update packed-state expressions, but found %d."),
+            UpdatedNodeCount);
+        return false;
+    }
+
+    for (UNiagaraGraph* Graph : ModifiedGraphs)
+    {
+        Graph->NotifyGraphChanged();
+    }
+
+    int32 MotionDisabledRendererCount = 0;
+    TArray<FString> MotionRendererDiagnostics;
+    ForEachObjectWithPackage(NiagaraSystem->GetOutermost(), [&](UObject* Object)
+    {
+        UNiagaraRendererProperties* Renderer = Cast<UNiagaraRendererProperties>(Object);
+        if (!Renderer)
+        {
+            return true;
+        }
+
+        Renderer->Modify();
+        Renderer->MotionVectorSetting = ENiagaraRendererMotionVectorSetting::Disable;
+        Renderer->PostEditChange();
+        MotionRendererDiagnostics.Add(FString::Printf(
+            TEXT("%s:%s"),
+            *Renderer->GetClass()->GetName(),
+            *Renderer->GetPathName()));
+        ++MotionDisabledRendererCount;
+        return true;
+    });
+    if (MotionDisabledRendererCount == 0)
+    {
+        OutMessage = TEXT("The Niagara system has no renderer to optimize.");
+        return false;
+    }
+
+    int32 OptimizedMeshRendererCount = 0;
+    TArray<FString> RendererDiagnostics;
+    ForEachObjectWithPackage(NiagaraSystem->GetOutermost(), [&](UObject* Object)
+    {
+        UNiagaraMeshRendererProperties* MeshRenderer =
+            Cast<UNiagaraMeshRendererProperties>(Object);
+        if (!MeshRenderer)
+        {
+            return true;
+        }
+
+        MeshRenderer->Modify();
+        // Tens of thousands of detailed per-instance dynamic shadows multiply
+        // the WPO vertex workload across shadow views. Performance-first units
+        // use blob/contact-shadow FX; close hero variants may opt back in.
+        MeshRenderer->bCastShadows = false;
+        // A separate opaque velocity pass replays the complete articulated WPO
+        // and was measured at essentially the same GPU cost as BasePass for
+        // 10k tanks. Army-scale units trade motion blur/TSR velocity fidelity
+        // for avoiding that duplicate full-scene draw.
+        // Preserve the MassBattle AgentRenderer_VAT slot ABI: its User.AgentMesh
+        // entries represent LOD 0..N. Articulation must not override asset LOD
+        // selection as a substitute for optimizing the parameter path.
+        for (int32 MeshIndex = 0; MeshIndex < MeshRenderer->Meshes.Num(); ++MeshIndex)
+        {
+            FNiagaraMeshRendererMeshProperties& MeshProperties = MeshRenderer->Meshes[MeshIndex];
+            const FName MeshBindingName =
+                MeshProperties.MeshParameterBinding.ResolvedParameter.GetName();
+            const bool bAgentMeshLODSlot = MeshBindingName == FName(TEXT("User.AgentMesh"));
+            const bool bEmptyLegacyPlaceholder = MeshRenderer->Meshes.Num() == 1
+                && MeshBindingName.IsNone()
+                && !MeshProperties.Mesh;
+            if (!bAgentMeshLODSlot && !bEmptyLegacyPlaceholder)
+            {
+                continue;
+            }
+            MeshProperties.LODMode = ENiagaraMeshLODMode::LODLevel;
+            MeshProperties.LODLevel = MeshIndex;
+#if WITH_EDITORONLY_DATA
+            MeshProperties.LODLevelBinding.SetDefaultValueEditorOnly<int32>(MeshIndex);
+#endif
+        }
+        MeshRenderer->PostEditChange();
+        FString MeshDiagnostics;
+        for (int32 MeshIndex = 0; MeshIndex < MeshRenderer->Meshes.Num(); ++MeshIndex)
+        {
+            const FNiagaraMeshRendererMeshProperties& MeshProperties =
+                MeshRenderer->Meshes[MeshIndex];
+            const UStaticMesh* Mesh = MeshProperties.Mesh;
+            MeshDiagnostics += FString::Printf(
+                TEXT(" slot%d=%s mesh_binding=%s lod_mode=%d lod=%d lods=%d tris=["),
+                MeshIndex,
+                Mesh ? *Mesh->GetPathName() : TEXT("None"),
+                *MeshProperties.MeshParameterBinding.ResolvedParameter.GetName().ToString(),
+                static_cast<int32>(MeshProperties.LODMode),
+                MeshProperties.LODLevel,
+                Mesh ? Mesh->GetNumLODs() : 0);
+            if (Mesh)
+            {
+                for (int32 LODIndex = 0; LODIndex < Mesh->GetNumLODs(); ++LODIndex)
+                {
+                    if (LODIndex > 0)
+                    {
+                        MeshDiagnostics += TEXT(",");
+                    }
+                    MeshDiagnostics += FString::FromInt(Mesh->GetNumTriangles(LODIndex));
+                }
+            }
+            MeshDiagnostics += TEXT("]");
+        }
+        RendererDiagnostics.Add(FString::Printf(
+            TEXT("renderer%d=%s outer=%s enabled=%d meshes_binding=%s dynamic1=%s%s"),
+            OptimizedMeshRendererCount,
+            *MeshRenderer->GetName(),
+            MeshRenderer->GetOuter() ? *MeshRenderer->GetOuter()->GetPathName() : TEXT("None"),
+            MeshRenderer->GetIsEnabled() ? 1 : 0,
+            *MeshRenderer->MeshesBinding.ResolvedParameter.GetName().ToString(),
+            *MeshRenderer->DynamicMaterial1Binding.GetParamMapBindableVariable().GetName().ToString(),
+            *MeshDiagnostics));
+        ++OptimizedMeshRendererCount;
+        return true;
+    });
+    if (OptimizedMeshRendererCount == 0)
+    {
+        OutMessage = TEXT("The Niagara system has no mesh renderer to optimize.");
+        return false;
+    }
+
+    NiagaraSystem->PostEditChange();
+    NiagaraSystem->MarkPackageDirty();
+    NiagaraSystem->RequestCompile(true);
+    NiagaraSystem->WaitForCompilationComplete(true, false);
+
+    OutMessage = FString::Printf(
+        TEXT("Niagara decodes articulation once per GPU particle; disabled motion vectors on all %d renderer(s) and dynamic shadows on %d mesh renderer(s). renderers=[%s] hlsl=[%s] %s"),
+        MotionDisabledRendererCount,
+        OptimizedMeshRendererCount,
+        *FString::Join(MotionRendererDiagnostics, TEXT(",")),
+        *FString::Join(HlslDiagnostics, TEXT(",")),
+        *FString::Join(RendererDiagnostics, TEXT(" | ")));
+    return true;
+}
+
 FMBSTAssetValidationResult UMBSTSingleTurretEditorLibrary::ValidateGeneratedArticulatedMesh(
     UStaticMesh* ArticulatedMesh,
     const bool bExpectBodyVATMask)
@@ -1544,6 +1999,7 @@ bool UMBSTSingleTurretEditorLibrary::ConfigureArticulationBaseMaterial(
     constexpr TCHAR PositionFunctionName[] = TEXT("MBST_ArticulatePositionObjectSpace");
     constexpr TCHAR NormalFunctionName[] = TEXT("MBST_ArticulateNormalObjectSpace");
     constexpr TCHAR NormalOutputMarker[] = TEXT("MBST normal: articulated local to world");
+    constexpr TCHAR NormalSwitchMarker[] = TEXT("MBST normal quality switch");
 
     UMaterialExpressionCustom* PositionCustom = nullptr;
     UMaterialExpressionSetMaterialAttributes* NormalSet = nullptr;
@@ -1577,13 +2033,18 @@ bool UMBSTSingleTurretEditorLibrary::ConfigureArticulationBaseMaterial(
                 UMaterialExpression* CurrentNormalSource =
                     SetAttributes->Inputs[CandidateInputIndex].Expression;
                 if (CurrentNormalSource
-                    && CurrentNormalSource->Desc.Equals(NormalOutputMarker, ESearchCase::CaseSensitive))
+                    && (CurrentNormalSource->Desc.Equals(
+                            NormalOutputMarker,
+                            ESearchCase::CaseSensitive)
+                        || CurrentNormalSource->Desc.Equals(
+                            NormalSwitchMarker,
+                            ESearchCase::CaseSensitive)))
                 {
                     Material->Modify();
                     Material->bTangentSpaceNormal = false;
                     Material->PostEditChange();
                     Material->MarkPackageDirty();
-                    OutMessage = TEXT("The MBST articulated world-space normal path is already installed.");
+                    OutMessage = TEXT("The MBST articulated world-space normal path (with optional performance switch) is already installed.");
                     return true;
                 }
 
@@ -1761,6 +2222,353 @@ bool UMBSTSingleTurretEditorLibrary::ConfigureArticulationBaseMaterial(
     return true;
 }
 
+bool UMBSTSingleTurretEditorLibrary::ConfigurePrecomputedArticulationMaterial(
+    UMaterial* Material,
+    FString& OutMessage)
+{
+    OutMessage.Reset();
+    if (!IsValid(Material))
+    {
+        OutMessage = TEXT("Material is invalid.");
+        return false;
+    }
+
+    FString NormalMessage;
+    if (!ConfigureArticulationBaseMaterial(Material, NormalMessage))
+    {
+        OutMessage = FString::Printf(TEXT("Could not prepare articulated normals: %s"), *NormalMessage);
+        return false;
+    }
+
+    UMaterialExpressionCustom* PositionCustom = nullptr;
+    UMaterialExpressionCustom* NormalCustom = nullptr;
+    UMaterialExpressionDynamicParameter* ArticulationDynamicParameter = nullptr;
+    for (UMaterialExpression* Expression : Material->GetExpressions())
+    {
+        if (UMaterialExpressionCustom* Custom = Cast<UMaterialExpressionCustom>(Expression))
+        {
+            if (Custom->Code.Contains(TEXT("MBST_ArticulatePositionObjectSpace")))
+            {
+                PositionCustom = Custom;
+            }
+            if (Custom->Code.Contains(TEXT("MBST_ArticulateNormalObjectSpace")))
+            {
+                NormalCustom = Custom;
+            }
+        }
+
+        if (UMaterialExpressionDynamicParameter* DynamicParameter =
+            Cast<UMaterialExpressionDynamicParameter>(Expression))
+        {
+            if (DynamicParameter->ParameterIndex == 1)
+            {
+                ArticulationDynamicParameter = DynamicParameter;
+            }
+        }
+    }
+
+    if (!PositionCustom || !NormalCustom || !ArticulationDynamicParameter)
+    {
+        OutMessage = TEXT("Could not find the MBST position, normal and Dynamic Parameter 1 expressions.");
+        return false;
+    }
+
+    FCustomInput* PositionStateInput = PositionCustom->Inputs.FindByPredicate([](const FCustomInput& Input)
+    {
+        return Input.InputName == TEXT("PackedHalves")
+            || Input.InputName == TEXT("ArticulationParams");
+    });
+    FCustomInput* NormalStateInput = NormalCustom->Inputs.FindByPredicate([](const FCustomInput& Input)
+    {
+        return Input.InputName == TEXT("PackedHalves")
+            || Input.InputName == TEXT("ArticulationParams");
+    });
+    if (!PositionStateInput || !NormalStateInput)
+    {
+        OutMessage = TEXT("The MBST material Custom expressions do not expose their articulation-state input.");
+        return false;
+    }
+
+    const FString OldPositionCode = PositionCustom->Code;
+    const FString OldNormalCode = NormalCustom->Code;
+    const TArray<FCustomInput> OldPositionInputs = PositionCustom->Inputs;
+    const TArray<FCustomInput> OldNormalInputs = NormalCustom->Inputs;
+    const TArray<FString> OldParameterNames = ArticulationDynamicParameter->ParamNames;
+
+    Material->Modify();
+    PositionCustom->Modify();
+    NormalCustom->Modify();
+    ArticulationDynamicParameter->Modify();
+
+    ArticulationDynamicParameter->ParamNames = {
+        TEXT("MBST_SinYaw"),
+        TEXT("MBST_CosYaw"),
+        TEXT("MBST_SinPitch"),
+        TEXT("MBST_Recoil")
+    };
+
+    PositionStateInput->InputName = TEXT("ArticulationParams");
+    PositionStateInput->Input.Connect(5, ArticulationDynamicParameter);
+    const TArray<FString> PositionCodeLines = {
+        TEXT("float4 YawPitchSinCos = MBST_ExpandCompactArticulation(ArticulationParams);"),
+        TEXT("float4 ArticulationMask = float4(VertexMask.rgb, VertexMask.g);"),
+        TEXT("float3 ArticulatedPositionObject = MBST_ArticulatePositionObjectSpace("),
+        TEXT("    PositionObject, ArticulationMask, TurretPivotObject, TurretAxisObject,"),
+        TEXT("    BarrelPivotObject, BarrelAxisObject, BarrelForwardObject,"),
+        TEXT("    YawPitchSinCos, saturate(ArticulationParams.w) * MaxRecoilDistance);"),
+        TEXT("return ArticulatedPositionObject - PositionObject;")
+    };
+    PositionCustom->Code = FString::Join(PositionCodeLines, TEXT("\n"));
+
+    NormalStateInput->InputName = TEXT("ArticulationParams");
+    NormalStateInput->Input.Connect(5, ArticulationDynamicParameter);
+    const TArray<FString> NormalCodeLines = {
+        TEXT("float4 YawPitchSinCos = MBST_ExpandCompactArticulation(ArticulationParams);"),
+        TEXT("float4 ArticulationMask = float4(VertexMask.rgb, VertexMask.g);"),
+        TEXT("return MBST_ArticulateNormalObjectSpace("),
+        TEXT("    NormalObject, ArticulationMask, TurretAxisObject, BarrelAxisObject, YawPitchSinCos);")
+    };
+    NormalCustom->Code = FString::Join(NormalCodeLines, TEXT("\n"));
+
+    PositionCustom->RebuildOutputs();
+    NormalCustom->RebuildOutputs();
+    Material->PostEditChange();
+    const TArray<FString> CompileErrors = UMaterialEditingLibrary::RecompileMaterial(Material);
+    if (!CompileErrors.IsEmpty())
+    {
+        PositionCustom->Code = OldPositionCode;
+        PositionCustom->Inputs = OldPositionInputs;
+        NormalCustom->Code = OldNormalCode;
+        NormalCustom->Inputs = OldNormalInputs;
+        ArticulationDynamicParameter->ParamNames = OldParameterNames;
+        PositionCustom->RebuildOutputs();
+        NormalCustom->RebuildOutputs();
+        Material->PostEditChange();
+        UMaterialEditingLibrary::RecompileMaterial(Material);
+        OutMessage = FString::Printf(
+            TEXT("Precomputed articulation material did not compile: %s"),
+            *FString::Join(CompileErrors, TEXT(" | ")));
+        return false;
+    }
+
+    Material->MarkPackageDirty();
+    OutMessage = TEXT("Material consumes GPU-particle articulation parameters; vertex code contains no packed decode or trigonometry.");
+    return true;
+}
+
+bool UMBSTSingleTurretEditorLibrary::ConfigurePerformanceNormalSwitch(
+    UMaterial* Material,
+    FString& OutMessage)
+{
+    OutMessage.Reset();
+    if (!IsValid(Material))
+    {
+        OutMessage = TEXT("Material is invalid.");
+        return false;
+    }
+
+    constexpr TCHAR ArticulatedOutputMarker[] = TEXT("MBST normal: articulated local to world");
+    constexpr TCHAR SwitchMarker[] = TEXT("MBST normal quality switch");
+    constexpr TCHAR VertexNormalMarker[] = TEXT("MBST normal: army vertex normal world");
+    const FGuid NormalAttributeId = FMaterialAttributeDefinitionMap::GetID(MP_Normal);
+
+    UMaterialExpressionSetMaterialAttributes* NormalSet = nullptr;
+    int32 NormalInputIndex = INDEX_NONE;
+    UMaterialExpressionTransform* ArticulatedLocalToWorld = nullptr;
+    UMaterialExpressionStaticSwitchParameter* ExistingSwitch = nullptr;
+    UMaterialExpressionVertexNormalWS* ArmyVertexNormal = nullptr;
+    for (UMaterialExpression* Expression : Material->GetExpressions())
+    {
+        if (UMaterialExpressionTransform* Transform = Cast<UMaterialExpressionTransform>(Expression))
+        {
+            if (Transform->Desc.Equals(ArticulatedOutputMarker, ESearchCase::CaseSensitive))
+            {
+                ArticulatedLocalToWorld = Transform;
+            }
+        }
+        if (UMaterialExpressionStaticSwitchParameter* Switch =
+            Cast<UMaterialExpressionStaticSwitchParameter>(Expression))
+        {
+            if (Switch->Desc.Equals(SwitchMarker, ESearchCase::CaseSensitive))
+            {
+                ExistingSwitch = Switch;
+            }
+        }
+        if (UMaterialExpressionVertexNormalWS* VertexNormal =
+            Cast<UMaterialExpressionVertexNormalWS>(Expression))
+        {
+            if (VertexNormal->Desc.Equals(VertexNormalMarker, ESearchCase::CaseSensitive))
+            {
+                ArmyVertexNormal = VertexNormal;
+            }
+        }
+
+        UMaterialExpressionSetMaterialAttributes* SetAttributes =
+            Cast<UMaterialExpressionSetMaterialAttributes>(Expression);
+        if (!SetAttributes)
+        {
+            continue;
+        }
+        int32 AttributeIndex = INDEX_NONE;
+        if (SetAttributes->AttributeSetTypes.Find(NormalAttributeId, AttributeIndex))
+        {
+            NormalSet = SetAttributes;
+            NormalInputIndex = AttributeIndex + 1;
+        }
+    }
+
+    if (ExistingSwitch)
+    {
+        if (!ArmyVertexNormal)
+        {
+            ArmyVertexNormal = Cast<UMaterialExpressionVertexNormalWS>(
+                UMaterialEditingLibrary::CreateMaterialExpression(
+                    Material,
+                    UMaterialExpressionVertexNormalWS::StaticClass(),
+                    ExistingSwitch->MaterialExpressionEditorX - 250,
+                    ExistingSwitch->MaterialExpressionEditorY + 150));
+        }
+        if (!ArmyVertexNormal)
+        {
+            OutMessage = TEXT("Could not create the army-scale vertex-normal expression.");
+            return false;
+        }
+        ArmyVertexNormal->Modify();
+        ArmyVertexNormal->Desc = VertexNormalMarker;
+        ExistingSwitch->Modify();
+        ExistingSwitch->DefaultValue = false;
+        ExistingSwitch->B.Connect(0, ArmyVertexNormal);
+        Material->Modify();
+        Material->bFullyRough = true;
+        Material->PostEditChange();
+        const TArray<FString> CompileErrors = UMaterialEditingLibrary::RecompileMaterial(Material);
+        if (!CompileErrors.IsEmpty())
+        {
+            OutMessage = FString::Printf(
+                TEXT("Existing MBST normal quality switch did not compile: %s"),
+                *FString::Join(CompileErrors, TEXT(" | ")));
+            return false;
+        }
+        Material->MarkPackageDirty();
+        OutMessage = TEXT("Performance normal path already installed; articulated pixel normals remain opt-in.");
+        return true;
+    }
+
+    if (!NormalSet
+        || !NormalSet->Inputs.IsValidIndex(NormalInputIndex)
+        || !ArticulatedLocalToWorld)
+    {
+        OutMessage = TEXT("Could not find the installed MBST articulated-normal chain.");
+        return false;
+    }
+
+    UMaterialExpressionCustom* NormalCustom = Cast<UMaterialExpressionCustom>(
+        ArticulatedLocalToWorld->Input.Expression);
+    const FCustomInput* NormalObjectInput = NormalCustom
+        ? NormalCustom->Inputs.FindByPredicate([](const FCustomInput& Input)
+        {
+            return Input.InputName == TEXT("NormalObject");
+        })
+        : nullptr;
+    UMaterialExpressionTransform* TangentToLocal = NormalObjectInput
+        ? Cast<UMaterialExpressionTransform>(NormalObjectInput->Input.Expression)
+        : nullptr;
+    if (!TangentToLocal || !TangentToLocal->Input.IsConnected())
+    {
+        OutMessage = TEXT("Could not recover the source normal feeding the MBST articulation chain.");
+        return false;
+    }
+
+    UMaterialExpressionTransform* RigidLocalToWorld = Cast<UMaterialExpressionTransform>(
+        UMaterialEditingLibrary::CreateMaterialExpression(
+            Material,
+            UMaterialExpressionTransform::StaticClass(),
+            NormalSet->MaterialExpressionEditorX - 300,
+            NormalSet->MaterialExpressionEditorY - 100));
+    UMaterialExpressionStaticSwitchParameter* QualitySwitch =
+        Cast<UMaterialExpressionStaticSwitchParameter>(
+            UMaterialEditingLibrary::CreateMaterialExpression(
+                Material,
+                UMaterialExpressionStaticSwitchParameter::StaticClass(),
+                NormalSet->MaterialExpressionEditorX - 100,
+            NormalSet->MaterialExpressionEditorY - 250));
+    ArmyVertexNormal = Cast<UMaterialExpressionVertexNormalWS>(
+        UMaterialEditingLibrary::CreateMaterialExpression(
+            Material,
+            UMaterialExpressionVertexNormalWS::StaticClass(),
+            NormalSet->MaterialExpressionEditorX - 300,
+            NormalSet->MaterialExpressionEditorY + 150));
+    if (!RigidLocalToWorld || !QualitySwitch || !ArmyVertexNormal)
+    {
+        if (ArmyVertexNormal)
+        {
+            UMaterialEditingLibrary::DeleteMaterialExpression(Material, ArmyVertexNormal);
+        }
+        if (QualitySwitch)
+        {
+            UMaterialEditingLibrary::DeleteMaterialExpression(Material, QualitySwitch);
+        }
+        if (RigidLocalToWorld)
+        {
+            UMaterialEditingLibrary::DeleteMaterialExpression(Material, RigidLocalToWorld);
+        }
+        OutMessage = TEXT("Could not create the MBST performance normal switch.");
+        return false;
+    }
+
+    RigidLocalToWorld->Modify();
+    RigidLocalToWorld->TransformSourceType = TRANSFORMSOURCE_Local;
+    RigidLocalToWorld->TransformType = TRANSFORM_World;
+    RigidLocalToWorld->Desc = TEXT("MBST normal: rigid local to world");
+    RigidLocalToWorld->Input.Connect(0, TangentToLocal);
+
+    ArmyVertexNormal->Modify();
+    ArmyVertexNormal->Desc = VertexNormalMarker;
+
+    QualitySwitch->Modify();
+    QualitySwitch->ParameterName = TEXT("MBST_HighQualityArticulatedNormals");
+    QualitySwitch->ExpressionGUID = FGuid::NewGuid();
+    QualitySwitch->DefaultValue = false;
+    QualitySwitch->DynamicBranch = false;
+    QualitySwitch->Desc = SwitchMarker;
+    QualitySwitch->A.Connect(0, ArticulatedLocalToWorld);
+    QualitySwitch->B.Connect(0, ArmyVertexNormal);
+
+    Material->Modify();
+    NormalSet->Modify();
+    const FExpressionInput OldNormalInput = NormalSet->Inputs[NormalInputIndex];
+    const bool bConnected = NormalSet->ConnectInputAttribute(MP_Normal, QualitySwitch, 0);
+    Material->bTangentSpaceNormal = false;
+    Material->bFullyRough = true;
+    Material->PostEditChange();
+    TArray<FString> CompileErrors;
+    if (bConnected)
+    {
+        CompileErrors = UMaterialEditingLibrary::RecompileMaterial(Material);
+    }
+    else
+    {
+        CompileErrors.Add(TEXT("Could not connect the static switch to Normal."));
+    }
+    if (!CompileErrors.IsEmpty())
+    {
+        NormalSet->Inputs[NormalInputIndex] = OldNormalInput;
+        UMaterialEditingLibrary::DeleteMaterialExpression(Material, QualitySwitch);
+        UMaterialEditingLibrary::DeleteMaterialExpression(Material, RigidLocalToWorld);
+        UMaterialEditingLibrary::DeleteMaterialExpression(Material, ArmyVertexNormal);
+        Material->PostEditChange();
+        UMaterialEditingLibrary::RecompileMaterial(Material);
+        OutMessage = FString::Printf(
+            TEXT("MBST performance normal switch did not compile: %s"),
+            *FString::Join(CompileErrors, TEXT(" | ")));
+        return false;
+    }
+
+    Material->MarkPackageDirty();
+    OutMessage = TEXT("Installed a static normal-quality switch; the default permutation removes per-pixel turret/barrel Rodrigues rotation.");
+    return true;
+}
+
 bool UMBSTSingleTurretEditorLibrary::ConfigureArticulationMaterialInstance(
     UMaterialInstanceConstant* MaterialInstance,
     UMBSTSingleTurretAsset* Layout,
@@ -1820,13 +2628,40 @@ bool UMBSTSingleTurretEditorLibrary::ConfigureMassBattleRendererClass(
     }
 
     CDO->Modify();
+    // LOD policy belongs to the authored mesh/scalability configuration, not
+    // to the turret parameter transport path. Do not modify MinLOD here.
     CDO->AgentMesh = Layout->ArticulatedMesh;
     CDO->NiagaraSystemAsset = NiagaraSystem;
+    // A mechanical renderer owns a homogeneous mesh/material path.  Use one
+    // exact-size Niagara component for the 10k target instead of either
+    // repeating every parallel-array setter or simulating a second 10k of
+    // permanently hidden particle slots.
+    CDO->RenderBatchSize = 10000;
+    if (AMBSTSingleTurretRenderer* PerformanceRenderer =
+        Cast<AMBSTSingleTurretRenderer>(CDO))
+    {
+        PerformanceRenderer->bTreatBatchComponentsAsStationary = true;
+        PerformanceRenderer->bDisableVertexDeformationVelocity = true;
+    }
     CDO->PostEditChange();
     CDO->MarkPackageDirty();
     RendererClass->MarkPackageDirty();
 
-    OutMessage = TEXT("MassBattle renderer defaults now reference the articulated mesh and Niagara system.");
+    FString LODTriangles;
+    for (int32 LODIndex = 0; LODIndex < Layout->ArticulatedMesh->GetNumLODs(); ++LODIndex)
+    {
+        if (LODIndex > 0)
+        {
+            LODTriangles += TEXT(",");
+        }
+        LODTriangles += FString::FromInt(Layout->ArticulatedMesh->GetNumTriangles(LODIndex));
+    }
+    OutMessage = FString::Printf(
+        TEXT("MassBattle renderer defaults reference %s and use a 10,000-slot performance batch; mesh min LOD=%d LODs=%d triangles=[%s]."),
+        *Layout->ArticulatedMesh->GetPathName(),
+        Layout->ArticulatedMesh->GetMinLODIdx(),
+        Layout->ArticulatedMesh->GetNumLODs(),
+        *LODTriangles);
     return true;
 }
 
@@ -2220,32 +3055,52 @@ UMassBattleAgentConfigDataAsset* UMBSTSingleTurretEditorLibrary::CreateSingleTur
     }
 
     const FString ObjectPath = FString::Printf(TEXT("%s.%s"), *PackageName, *SafeName);
-    if (FindObject<UObject>(nullptr, *ObjectPath) || LoadObject<UObject>(nullptr, *ObjectPath))
+    UObject* ExistingObject = FindObject<UObject>(nullptr, *ObjectPath);
+    if (!ExistingObject)
     {
-        OutMessage = FString::Printf(TEXT("AgentConfig already exists: %s"), *ObjectPath);
+        ExistingObject = LoadObject<UObject>(nullptr, *ObjectPath);
+    }
+
+    UMassBattleAgentConfigDataAsset* Result = Cast<UMassBattleAgentConfigDataAsset>(ExistingObject);
+    const bool bCreatedConfig = !IsValid(Result);
+    if (ExistingObject && bCreatedConfig)
+    {
+        OutMessage = FString::Printf(
+            TEXT("Output path is occupied by a non-AgentConfig asset: %s"),
+            *ObjectPath);
         return nullptr;
     }
 
-    UPackage* Package = CreatePackage(*PackageName);
-    UMassBattleAgentConfigDataAsset* Result = IsValid(OptionalTemplate)
-        ? DuplicateObject<UMassBattleAgentConfigDataAsset>(OptionalTemplate, Package, *SafeName)
-        : NewObject<UMassBattleAgentConfigDataAsset>(
-            Package,
-            *SafeName,
-            RF_Public | RF_Standalone | RF_Transactional);
+    if (bCreatedConfig)
+    {
+        UPackage* Package = CreatePackage(*PackageName);
+        Result = IsValid(OptionalTemplate)
+            ? DuplicateObject<UMassBattleAgentConfigDataAsset>(OptionalTemplate, Package, *SafeName)
+            : NewObject<UMassBattleAgentConfigDataAsset>(
+                Package,
+                *SafeName,
+                RF_Public | RF_Standalone | RF_Transactional);
+    }
     if (!Result)
     {
         OutMessage = TEXT("Failed to create the AgentConfig.");
         return nullptr;
     }
 
+    Result->Modify();
     Result->SetFlags(RF_Public | RF_Standalone | RF_Transactional);
-    FAssetRegistryModule::AssetCreated(Result);
+    if (bCreatedConfig)
+    {
+        FAssetRegistryModule::AssetCreated(Result);
+    }
 
     FString ConfigureMessage;
     if (!ConfigureAgentConfigSingleTurret(Result, Layout, InitialState, true, ConfigureMessage))
     {
-        Result->ClearFlags(RF_Public | RF_Standalone);
+        if (bCreatedConfig)
+        {
+            Result->ClearFlags(RF_Public | RF_Standalone);
+        }
         OutMessage = ConfigureMessage;
         return nullptr;
     }
@@ -2258,16 +3113,22 @@ UMassBattleAgentConfigDataAsset* UMBSTSingleTurretEditorLibrary::CreateSingleTur
         IsValid(MobileFireProfile),
         MobileFireMessage))
     {
-        Result->ClearFlags(RF_Public | RF_Standalone);
+        if (bCreatedConfig)
+        {
+            Result->ClearFlags(RF_Public | RF_Standalone);
+        }
         OutMessage = MobileFireMessage;
         return nullptr;
     }
 
     Result->MarkPackageDirty();
     OutMessage = FString::Printf(
-        TEXT("Actor conversion created direct single-turret AgentConfig '%s'%s. %s %s"),
+        TEXT("Actor conversion %s direct single-turret AgentConfig '%s'%s. %s %s"),
+        bCreatedConfig ? TEXT("created") : TEXT("updated existing"),
         *Result->GetPathName(),
-        IsValid(OptionalTemplate) ? TEXT(" from the optional normal-unit template") : TEXT(" from MassBattle defaults"),
+        bCreatedConfig
+            ? (IsValid(OptionalTemplate) ? TEXT(" from the optional normal-unit template") : TEXT(" from MassBattle defaults"))
+            : TEXT(" in place"),
         *ConfigureMessage,
         *MobileFireMessage);
     return Result;

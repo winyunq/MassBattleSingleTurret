@@ -69,6 +69,22 @@ void MBST_DecodePackedStateSinCos(
     YawPitchSinCos = float4(SinYaw, CosYaw, SinPitch, CosPitch);
 }
 
+// Compact GPU-particle ABI carried by DynamicMaterialParameter1:
+// x = sin(yaw), y = cos(yaw), z = sin(pitch), w = recoil [0, 1].
+// Pitch is constrained to [-90, 90], therefore cos(pitch) is non-negative.
+float4 MBST_ExpandCompactArticulation(float4 ArticulationParams)
+{
+    float2 YawSinCos = ArticulationParams.xy;
+    const float YawLengthSquared = dot(YawSinCos, YawSinCos);
+    YawSinCos = YawLengthSquared > 1.0e-8f
+        ? YawSinCos * rsqrt(YawLengthSquared)
+        : float2(0.0f, 1.0f);
+
+    const float SinPitch = clamp(ArticulationParams.z, -1.0f, 1.0f);
+    const float CosPitch = sqrt(saturate(1.0f - SinPitch * SinPitch));
+    return float4(YawSinCos, SinPitch, CosPitch);
+}
+
 float3 MBST_RotateAxisSinCos(float3 Vector, float3 Axis, float SinAngle, float CosAngle)
 {
     Axis = normalize(Axis + float3(1.0e-8f, 0.0f, 0.0f));

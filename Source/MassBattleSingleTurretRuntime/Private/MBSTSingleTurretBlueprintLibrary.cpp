@@ -219,10 +219,9 @@ FEntityTemplateData UMBSTSingleTurretBlueprintLibrary::AddMobileFireToTemplate(
 
     FMBSTMobileFireShared Shared;
     MBSTBlueprintPrivate::FillMobileFireShared(Shared, FireProfile);
-    UMassAPISubsystem::SetSharedFragment<FMBSTMobileFireShared>(
-        ClonedTemplate,
-        Shared,
-        *MassAPI->GetEntityManager());
+    UMassAPISubsystem::RemoveSharedFragment<FMBSTMobileFireShared>(ClonedTemplate);
+    ClonedTemplate.AddSharedFragment(
+        MassAPI->GetEntityManager()->GetOrCreateSharedFragment(Shared));
 
     return FEntityTemplateData(MakeShared<FMassEntityTemplateData>(MoveTemp(ClonedTemplate)));
 }
@@ -431,10 +430,9 @@ FEntityTemplateData UMBSTSingleTurretBlueprintLibrary::AddSingleTurretToTemplate
 
     FMBSTSingleTurretShared Shared;
     MBSTBlueprintPrivate::FillSharedLayout(Shared, Layout);
-    UMassAPISubsystem::SetSharedFragment<FMBSTSingleTurretShared>(
-        ClonedTemplate,
-        Shared,
-        *MassAPI->GetEntityManager());
+    UMassAPISubsystem::RemoveSharedFragment<FMBSTSingleTurretShared>(ClonedTemplate);
+    ClonedTemplate.AddSharedFragment(
+        MassAPI->GetEntityManager()->GetOrCreateSharedFragment(Shared));
 
     return FEntityTemplateData(MakeShared<FMassEntityTemplateData>(MoveTemp(ClonedTemplate)));
 }

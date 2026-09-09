@@ -333,14 +333,11 @@ void AMBSTRtsMobileFireDemoActor::ConfigureSpawnedEntity(
         // Idle until the RTS controller creates an AgentsMoveTo task.
         Navigation->bMoveByFlowfieldOnIdle = false;
         Navigation->FlowFieldToUse = GroundFlowField;
-        Navigation->FlowFieldToBind = GroundFlowField;
     }
     if (FNavigating* Navigating = MassAPI->GetFragmentPtr<FNavigating>(Entity))
     {
         Navigating->FlowFieldToUsePtr = GroundFlowField;
-        Navigating->FlowFieldToBindPtr = GroundFlowField;
         Navigating->FlowFieldToUse_Previous = GroundFlowField;
-        Navigating->FlowFieldToBind_Previous = GroundFlowField;
     }
     if (FSelect* Select = MassAPI->GetFragmentPtr<FSelect>(Entity))
     {

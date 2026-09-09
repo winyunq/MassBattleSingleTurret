@@ -9,9 +9,9 @@
 ## 🌟 Key Advantages
 
 - **Zero Actor & Zero Sub-agent Overhead**: Replaces 3-entity compositions (Body + Turret + Barrel) or Actor bindings with **1 single Mass Entity**.
-- **Vertex Color Joint Masking & 32-bit State Packing**: Turret Yaw, Barrel Pitch, and Recoil are encoded into a single 32-bit PackedState transmitted via two 16-bit float Dynamic Material Parameters to Niagara and VAT Material.
+- **Vertex Color Joint Masking & 32-bit State Packing**: Turret yaw, barrel pitch, and recoil use one 32-bit Mass/Niagara payload. Niagara decodes it once per GPU particle and sends compact sin/cos/recoil parameters to the material; vertex code only performs rigid articulation.
 - **Zero-Overhead Query Filtering**: Extends Mass queries via `FMBSTSingleTurretTag`. Ordinary non-turret units completely bypass the turret processing pipeline.
-- **High Performance**: In a 500-tank tracking benchmark, reduces frame time from **22.93 ms** (Actor composition) to **6.95 ms** (SingleTurret entity).
+- **Mechanical-unit fast path**: Tanks, artillery, anti-air and other one-root/few-joint units should prefer this single-entity army route over Actor or child-Agent compositions. With the asset-authored `MinLOD=0` and LOD `0..4` slot ABI preserved, the final 10,000-unit DX12 benchmark sustained a **71.26 FPS median** across three independent runs; the GPU delta versus ordinary one-entity Mass was **-0.022 ms (within measurement noise)** on the test machine.
 
 ---
 
@@ -118,7 +118,7 @@ Explore the demo content in `/MassBattleSingleTurret/Demo/`:
 
 - **Tank Demo**: `/MassBattleSingleTurret/Demo/Tank`
 - **Mobile Fire Demo**: `/MassBattleSingleTurret/Demo/MobileFire/Map_MBST_MobileFire`
-- **RTS Battle Demo**: `/MassBattleSingleTurret/Demo/RTS/Map_MBST_RTS_MobileFire`
+- **RTS Battle Demo**: `/MassBattleSingleTurret/Demo/RTS/Map_MBST_RTS_MobileFire` — copied from the MassBattleFrame RTS scene and configured for 5,000 player plus 5,000 enemy single-entity GPU-turret tanks.
 - **Performance Benchmark**: `/MassBattleSingleTurret/Demo/Benchmark/Map_MBST_NativeTrackingBenchmark`
 
 Run functional and benchmark scripts via PowerShell:

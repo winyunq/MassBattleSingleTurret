@@ -5,7 +5,7 @@
 #include "MassProcessor.h"
 #include "MBSTSingleTurretProcessor.generated.h"
 
-/** Fixed single-turret hot path that writes one packed int32 before the MassBattle renderer runs. */
+/** Once-per-logic-frame turret update that writes one packed int32 before the MassBattle renderer runs. */
 UCLASS()
 class MASSBATTLESINGLETURRETRUNTIME_API UMBSTSingleTurretPackProcessor : public UMassProcessor
 {

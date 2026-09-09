@@ -10,14 +10,18 @@
 #include "Engine/World.h"
 #include "Fragments/Collider.h"
 #include "Fragments/Death.h"
+#include "Fragments/Determinism.h"
 #include "Fragments/Health.h"
 #include "Fragments/Move.h"
+#include "Fragments/Network.h"
+#include "Fragments/StyleType.h"
 #include "Fragments/Trace.h"
 #include "Fragments/Transform.h"
 #include "MassAPISubsystem.h"
 #include "MassExecutionContext.h"
 #include "Subsystems/MassBattleProjectileSubsystem.h"
 #include "Subsystems/MassBattleSubsystem.h"
+#include "Subsystems/MassBattleNetworkSubsystem.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 #include "Misc/AutomationTest.h"
@@ -397,6 +401,38 @@ namespace MBSTMobileFirePrivate
             return;
         }
 
+        UMassBattleNetworkSubsystem* Network =
+            UMassBattleNetworkSubsystem::GetPtr(ProjectileSubsystem);
+        if (!Network)
+        {
+            return;
+        }
+        // Combat is dispatched by the existing lockstep SimStages at Subtick1.
+        // These accepted shots are simulation results on every peer, not new
+        // player inputs. Use the native execution scope for the existing deferred
+        // projectile spawn instead of sending a second network command.
+        const TGuardValue<bool> CommandExecution(Network->bInCommandExecution, true);
+
+        // Keep the deferred spawner's instigator inheritance and trajectory math,
+        // but take its snapshot identity from the existing registered DA template.
+        FEntityTemplateData NetworkTemplateData;
+        const FNetworking* ProjectileNetworking = nullptr;
+        if (const UMassBattleSubsystem* MassBattle = ProjectileSubsystem->GetMassBattleSubsystem();
+            MassBattle && MassBattle->bNetworkedMode)
+        {
+            const FName TemplateKey(*ProjectileConfig->GetPathName());
+            if (!Network->GetNetworkTemplateData(TemplateKey, NetworkTemplateData))
+            {
+                NetworkTemplateData = ProjectileSubsystem->MakeProjectileTemplateFromDataAsset(ProjectileConfig);
+            }
+            if (!ensure(NetworkTemplateData.IsValid()
+                && UMassAPISubsystem::HasFragment<FNetworking>(*NetworkTemplateData.Get())))
+            {
+                return;
+            }
+            ProjectileNetworking = NetworkTemplateData.Get()->GetMutableFragment<FNetworking>();
+        }
+
         bool bSuccessful = false;
         FEntityHandle ProjectileHandle;
         FEntityArray IgnoreEntities;
@@ -480,6 +516,13 @@ namespace MBSTMobileFirePrivate
         {
             if (UMassAPISubsystem* MassAPI = ProjectileSubsystem->GetMassAPISubsystem())
             {
+                if (ProjectileNetworking)
+                {
+                    // The native buffer builds before adding tags and values;
+                    // all finish in this stage's flush before snapshot capture.
+                    MassAPI->AddFragment(CommandBuffer, ProjectileHandle, *ProjectileNetworking);
+                    MassAPI->AddTag<FNetworkTag>(CommandBuffer, ProjectileHandle);
+                }
                 MassAPI->SetFlagDefer(CommandBuffer, ProjectileHandle, TEXT("Activated"));
             }
         }
@@ -493,14 +536,14 @@ UMBSTMobileFireMovementGateProcessor::UMBSTMobileFireMovementGateProcessor()
     : EntityQuery(*this)
 {
     ExecutionOrder.ExecuteBefore.Add(TEXT("MassBattleAgentMoveProcessor"));
-    // Match the original MassBattle Move/Trace/Behavior execution domain.
-    // Enabling only this processor on a dedicated server would be incorrect because
-    // its source processors are Client|Standalone in the supplied MassBattle build.
     ExecutionFlags = static_cast<int32>(
         EProcessorExecutionFlags::Client
+        | EProcessorExecutionFlags::Server
         | EProcessorExecutionFlags::Standalone);
     ProcessingPhase = EMassProcessingPhase::StartPhysics;
-    bAutoRegisterWithProcessingPhases = true;
+    // MassBattle simulation has one execution path: its manually-owned lockstep
+    // SimStages. UMBSTMobileFireSubsystem installs this processor there.
+    bAutoRegisterWithProcessingPhases = false;
     bRequiresGameThreadExecution = false;
     ExecutionPriority = 20;
 }
@@ -519,6 +562,14 @@ void UMBSTMobileFireMovementGateProcessor::Execute(
     FMassEntityManager& EntityManager,
     FMassExecutionContext& Context)
 {
+    UMassBattleSubsystem* MassBattle = UMassBattleSubsystem::GetPtr(this);
+    if (!MassBattle
+        || (!MassBattle->IsSubFrameScheduled(ESubFrame::Subtick1)
+            && !MassBattle->IsSubFrameScheduled(ESubFrame::Subtick2)))
+    {
+        return;
+    }
+
     EntityQuery.ForEachEntityChunk(Context, [](FMassExecutionContext& ChunkContext)
     {
         TArrayView<FMove> Moves = ChunkContext.GetMutableFragmentView<FMove>();
@@ -553,14 +604,14 @@ UMBSTMobileFireMovementGateRestoreProcessor::UMBSTMobileFireMovementGateRestoreP
 {
     ExecutionOrder.ExecuteAfter.Add(TEXT("MassBattleAgentMoveProcessor"));
     ExecutionOrder.ExecuteBefore.Add(TEXT("MassBattleAgentTraceProcessor"));
-    // Match the original MassBattle Move/Trace/Behavior execution domain.
-    // Enabling only this processor on a dedicated server would be incorrect because
-    // its source processors are Client|Standalone in the supplied MassBattle build.
     ExecutionFlags = static_cast<int32>(
         EProcessorExecutionFlags::Client
+        | EProcessorExecutionFlags::Server
         | EProcessorExecutionFlags::Standalone);
-    ProcessingPhase = EMassProcessingPhase::StartPhysics;
-    bAutoRegisterWithProcessingPhases = true;
+    // The manually owned movement stage places this after both move variants,
+    // restoring the temporary stop bit before later processors consume it.
+    ProcessingPhase = EMassProcessingPhase::FrameEnd;
+    bAutoRegisterWithProcessingPhases = false;
     bRequiresGameThreadExecution = false;
     ExecutionPriority = 10;
 }
@@ -578,6 +629,14 @@ void UMBSTMobileFireMovementGateRestoreProcessor::Execute(
     FMassEntityManager& EntityManager,
     FMassExecutionContext& Context)
 {
+    UMassBattleSubsystem* MassBattle = UMassBattleSubsystem::GetPtr(this);
+    if (!MassBattle
+        || (!MassBattle->IsSubFrameScheduled(ESubFrame::Subtick1)
+            && !MassBattle->IsSubFrameScheduled(ESubFrame::Subtick2)))
+    {
+        return;
+    }
+
     EntityQuery.ForEachEntityChunk(Context, [](FMassExecutionContext& ChunkContext)
     {
         TArrayView<FMove> Moves = ChunkContext.GetMutableFragmentView<FMove>();
@@ -602,14 +661,12 @@ UMBSTMobileFireCombatProcessor::UMBSTMobileFireCombatProcessor()
     : EntityQuery(*this)
 {
     ExecutionOrder.ExecuteAfter.Add(TEXT("MassBattleAgentBehaviorProcessor"));
-    // Match the original MassBattle Move/Trace/Behavior execution domain.
-    // Enabling only this processor on a dedicated server would be incorrect because
-    // its source processors are Client|Standalone in the supplied MassBattle build.
     ExecutionFlags = static_cast<int32>(
         EProcessorExecutionFlags::Client
+        | EProcessorExecutionFlags::Server
         | EProcessorExecutionFlags::Standalone);
     ProcessingPhase = EMassProcessingPhase::StartPhysics;
-    bAutoRegisterWithProcessingPhases = true;
+    bAutoRegisterWithProcessingPhases = false;
     bRequiresGameThreadExecution = true;
     ExecutionPriority = 5;
 }
@@ -620,7 +677,7 @@ void UMBSTMobileFireCombatProcessor::ConfigureQueries(
     FEntityQueryBuilder(EntityQuery)
         .All<FMBSTSingleTurretTag, FMBSTMobileFireTag>()
         .All<FLocating, FScaling, FCollider, FMove, FMoving, FTracing>(MARO)
-        .All<FRotating, FMBSTSingleTurretState, FMBSTMobileFireState>(MARW)
+        .All<FRotating, FStyleType, FMBSTSingleTurretState, FMBSTMobileFireState>(MARW)
         .All<FMBSTSingleTurretShared, FMBSTMobileFireShared>(MARO)
         .RegisterWithProcessor(*this);
 }
@@ -629,24 +686,16 @@ void UMBSTMobileFireCombatProcessor::Execute(
     FMassEntityManager& EntityManager,
     FMassExecutionContext& Context)
 {
+    UMassBattleSubsystem* MassBattle = UMassBattleSubsystem::GetPtr(this);
     UMassAPISubsystem* MassAPI = UMassAPISubsystem::GetPtr(this);
-    if (!MassAPI)
+    if (!MassBattle
+        || !MassBattle->IsSubFrameScheduled(ESubFrame::Subtick1)
+        || !MassAPI)
     {
         return;
     }
 
-    float DeltaSeconds = Context.GetWorld()
-        ? FMath::Max(Context.GetWorld()->GetDeltaSeconds(), 0.0f)
-        : 0.0f;
-
-    if (UMassBattleSubsystem* MassBattle = UMassBattleSubsystem::GetPtr(this))
-    {
-        if (!MassBattle->IsSubFrameScheduled(ESubFrame::Combat))
-        {
-            return;
-        }
-        DeltaSeconds = FMath::Max(MassBattle->GetCalculatedStepTime(), 0.0f);
-    }
+    const float DeltaSeconds = FMath::Max(MassBattle->GetCalculatedStepTime(), 0.0f);
 
     TArray<MBSTMobileFirePrivate::FPendingShot> PendingShots;
     PendingShots.Reserve(64);
@@ -657,8 +706,17 @@ void UMBSTMobileFireCombatProcessor::Execute(
             ChunkContext.GetSharedFragment<FMBSTSingleTurretShared>();
         const FMBSTMobileFireShared& FireShared =
             ChunkContext.GetSharedFragment<FMBSTMobileFireShared>();
+        TArrayView<FStyleType> Styles = ChunkContext.GetMutableFragmentView<FStyleType>();
+        TArrayView<FMBSTSingleTurretState> TurretStates =
+            ChunkContext.GetMutableFragmentView<FMBSTSingleTurretState>();
         if (!IsValid(TurretShared.Layout) || !IsValid(FireShared.Profile))
         {
+            for (int32 EntityIndex = 0; EntityIndex < ChunkContext.GetNumEntities(); ++EntityIndex)
+            {
+                Styles[EntityIndex].Index = MBSTPacking::SanitizeAndPack(
+                    TurretStates[EntityIndex],
+                    TurretShared);
+            }
             return;
         }
 
@@ -669,8 +727,6 @@ void UMBSTMobileFireCombatProcessor::Execute(
         TConstArrayView<FMoving> Movings = ChunkContext.GetFragmentView<FMoving>();
         TConstArrayView<FTracing> Tracings = ChunkContext.GetFragmentView<FTracing>();
         TArrayView<FRotating> Rotations = ChunkContext.GetMutableFragmentView<FRotating>();
-        TArrayView<FMBSTSingleTurretState> TurretStates =
-            ChunkContext.GetMutableFragmentView<FMBSTSingleTurretState>();
         TArrayView<FMBSTMobileFireState> FireStates =
             ChunkContext.GetMutableFragmentView<FMBSTMobileFireState>();
 
@@ -963,7 +1019,32 @@ void UMBSTMobileFireCombatProcessor::Execute(
                     FireShared.bBroadcastBlueprintFireEvent;
             }
         }
+
+        // MobileFire is the single writer for its packed articulation sample.
+        // Keep this as one cache-hot tail loop so every early-continue path is covered.
+        for (int32 EntityIndex = 0; EntityIndex < ChunkContext.GetNumEntities(); ++EntityIndex)
+        {
+            Styles[EntityIndex].Index = MBSTPacking::SanitizeAndPack(
+                TurretStates[EntityIndex],
+                TurretShared);
+        }
     });
+
+    if (MassBattle->bDeterministic && PendingShots.Num() > 1)
+    {
+        // Snapshot restoration can reorder chunks. The native projectile call
+        // allocates its UID immediately, so drain this existing array by shooter
+        // UID, just as the native registration queues use stable entity keys.
+        TArray<int32> ShooterKeys;
+        ShooterKeys.Reserve(PendingShots.Num());
+        for (const MBSTMobileFirePrivate::FPendingShot& PendingShot : PendingShots)
+        {
+            const FDeterminism* Determinism =
+                MassAPI->GetFragmentPtr<FDeterminism>(PendingShot.Request.Shooter);
+            ShooterKeys.Add(Determinism ? Determinism->UniqueID : -1);
+        }
+        SortByPreExtractedKeys(PendingShots, ShooterKeys);
+    }
 
     UMBSTMobileFireSubsystem* FireSubsystem = GetWorld()
         ? GetWorld()->GetSubsystem<UMBSTMobileFireSubsystem>()

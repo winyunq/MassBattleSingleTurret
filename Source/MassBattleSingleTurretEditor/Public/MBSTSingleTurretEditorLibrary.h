@@ -8,8 +8,10 @@
 
 class AActor;
 class AMassBattleAgentRenderer;
+class UAnimationAsset;
 class UAnimToTextureDataAsset;
 class UMaterial;
+class UMaterialInterface;
 class UMaterialInstanceConstant;
 class UMassBattleAgentConfigDataAsset;
 class UMBSTMobileFireProfile;
@@ -27,10 +29,48 @@ class MASSBATTLESINGLETURRETEDITOR_API UMBSTSingleTurretEditorLibrary : public U
     GENERATED_BODY()
 
 public:
+    /**
+     * Add a registered authoring component to a transient source Actor.
+     * This keeps Python/commandlet authoring on the same supported component
+     * ownership path on engine versions that do not expose AddInstanceComponent.
+     */
+    UFUNCTION(BlueprintCallable, Category = "MassBattle|Single Turret|Editor")
+    static UMBSTSingleTurretAuthoringComponent* AddTransientAuthoringComponent(
+        AActor* SourceActor,
+        FString& OutMessage);
+
+    /** Evaluate and freeze a skeletal component at an authored animation pose before mesh conversion. */
+    UFUNCTION(BlueprintCallable, Category = "MassBattle|Single Turret|Editor")
+    static bool PrepareSkeletalComponentPoseForConversion(
+        USkeletalMeshComponent* SkeletalComponent,
+        UAnimationAsset* Animation,
+        float TimeSeconds,
+        FString& OutMessage);
+
     UFUNCTION(BlueprintCallable, Category = "MassBattle|Single Turret|Editor")
     static FMBSTActorToSingleTurretResult ConvertActorToSingleTurretVAT(
         AActor* SourceActor,
         UMBSTSingleTurretAuthoringComponent* Authoring,
+        const FString& PackagePath,
+        const FString& AssetName,
+        const FMBSTActorToSingleTurretSettings& Settings);
+
+    // Production authoring entry for normalized mechanical units whose body,
+    // turret and optional barrel meshes share one object-space coordinate system.
+    // The transient assembly exists only while assets are generated; runtime
+    // units depend solely on the resulting AgentConfig, layout and renderer.
+    UFUNCTION(BlueprintCallable, Category = "MassBattle|Single Turret|Editor")
+    static FMBSTActorToSingleTurretResult ConvertStaticMeshesToSingleTurret(
+        UStaticMesh* BodyMesh,
+        UStaticMesh* TurretMesh,
+        UStaticMesh* BarrelMesh,
+        UMaterialInterface* MaterialOverride,
+        FVector TurretPivotObjectSpace,
+        FVector BarrelPivotObjectSpace,
+        FVector MuzzleObjectSpace,
+        float MaximumRecoilDistance,
+        float YawSpeedDegreesPerSecond,
+        float PitchSpeedDegreesPerSecond,
         const FString& PackagePath,
         const FString& AssetName,
         const FMBSTActorToSingleTurretSettings& Settings);
@@ -54,6 +94,12 @@ public:
     UFUNCTION(BlueprintPure, Category = "MassBattle|Single Turret|Editor")
     static FMBSTAssetValidationResult ValidateNiagaraStyleArray(UNiagaraSystem* NiagaraSystem);
 
+    /** Move packed-state decode and trigonometry from the material vertex path to one GPU particle evaluation. */
+    UFUNCTION(BlueprintCallable, Category = "MassBattle|Single Turret|Editor")
+    static bool ConfigureNiagaraPrecomputedArticulation(
+        UNiagaraSystem* NiagaraSystem,
+        FString& OutMessage);
+
     UFUNCTION(BlueprintPure, Category = "MassBattle|Single Turret|Editor")
     static FMBSTAssetValidationResult ValidateGeneratedArticulatedMesh(
         UStaticMesh* ArticulatedMesh,
@@ -62,6 +108,18 @@ public:
     /** Install the rigid-articulation normal path into the MBST VAT base material. */
     UFUNCTION(BlueprintCallable, Category = "MassBattle|Single Turret|Editor")
     static bool ConfigureArticulationBaseMaterial(
+        UMaterial* Material,
+        FString& OutMessage);
+
+    /** Consume precomputed articulation parameters from DynamicMaterialParameter1. */
+    UFUNCTION(BlueprintCallable, Category = "MassBattle|Single Turret|Editor")
+    static bool ConfigurePrecomputedArticulationMaterial(
+        UMaterial* Material,
+        FString& OutMessage);
+
+    /** Default to a compiled rigid-normal path; opt into articulated normals only for close quality variants. */
+    UFUNCTION(BlueprintCallable, Category = "MassBattle|Single Turret|Editor")
+    static bool ConfigurePerformanceNormalSwitch(
         UMaterial* Material,
         FString& OutMessage);
 

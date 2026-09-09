@@ -7,9 +7,9 @@
 ## 🌟 核心优势
 
 - **零 Actor / 零子 Agent 开销**：传统方式需要“车体 Entity + 炮塔子 Entity + 炮管子 Entity”或完整 Actor 绑定，本插件运行时仅需 **1 个 Mass Entity** 驱动。
-- **顶点色关节与 32位 状态压缩**：炮塔 Yaw 旋转、炮管 Pitch 俯仰与后坐力 Recoil 全部在 Niagara + 材质 VAT 阶段完成，通过两个 16-bit float 无损传输 32 位 PackedState。
+- **顶点色关节与 32 位状态压缩**：Mass/Niagara 只传一个 32-bit PackedState；Niagara GPU 每粒子解包并预计算三角函数，材质顶点阶段只做刚性关节变换。
 - **零开销过滤**：通过内嵌的 `FMBSTSingleTurretTag` 进行精确匹配，普通无炮塔单位完全不进入热路径处理。
-- **极致性能**：在 500 辆坦克移动追踪测试中，相比传统 Actor 组装（22.93 ms），单实体炮塔仅需 **6.95 ms**。
+- **机械单位默认军团路径**：坦克、火炮、防空炮等“一个根刚体 + 少量刚性关节”的单位优先走本插件，避免 Actor、子 Agent 与父子 Transform 传播。保留资产原生 `MinLOD=0` 和 LOD `0..4` 槽位 ABI 时，最终 10,000 单位 DX12 三次独立进程中位数为 **71.26 FPS**；炮塔与普通单实体 Mass 的 GPU 差值为 **-0.022 ms（测量噪声内）**。
 
 ---
 
@@ -138,7 +138,7 @@ Get Single Turret Pose(OutTurretTransform, OutBarrelTransform, OutMuzzleTransfor
 2. **移动开火/走 A 演示**：`/MassBattleSingleTurret/Demo/MobileFire/Map_MBST_MobileFire`
    可直观观察停车射击组（橙色曳光）与移动射击组（青色曳光）的移动与射击表现。
 3. **RTS 框选实战关卡**：`/MassBattleSingleTurret/Demo/RTS/Map_MBST_RTS_MobileFire`
-   支持框选单位、右键移动与 Attack-Move 规则验证。
+   复制自 MassBattleFrame RTS 场景，默认生成 5,000 己方 + 5,000 敌方单实体 GPU 炮塔坦克；支持框选单位、右键移动与 Attack-Move 规则验证。
 4. **性能基准测试关卡**：`/MassBattleSingleTurret/Demo/Benchmark/Map_MBST_NativeTrackingBenchmark`
 
 可以通过 Powershell 自动化脚本运行回归测试：

@@ -46,7 +46,7 @@ Recoil → Pitch → Yaw
 
 ## Style 错乱
 
-不要把整个 PackedState 直接转成单个 float。应拆成两个 16 位整数传给材质，再恢复完整 uint32；VisualStyle 是恢复值的低 8 位。
+不要把整个 PackedState 直接转成单个 float，也不要在材质顶点阶段恢复 uint32。当前 ABI 是 Niagara GPU 从 `Particles.StyleType` 解包一次，并通过 `DynamicMaterialParameter1 = (sinYaw, cosYaw, sinPitch, recoil)` 传给材质。若看到 `PackedHalves`、`65535` 或 `MBST_DecodePackedStateSinCos` 出现在材质 Custom 节点，说明资产仍是旧路径，应运行 `Configure Demo Precomputed Articulation` 迁移。
 
 ## 编译 API 差异
 

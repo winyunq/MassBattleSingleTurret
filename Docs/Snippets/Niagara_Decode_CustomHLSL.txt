@@ -1,5 +1,9 @@
-// Niagara Custom HLSL
-// Input: int PackedState
-// Outputs: int VisualStyle, float4 YawPitchSinCos, float RecoilNormalized
-#include "/Plugin/MassBattleSingleTurret/Private/MBSTSingleTurret.ush"
-MBST_DecodePackedStateSinCos(PackedState, VisualStyle, YawPitchSinCos, RecoilNormalized);
+// Niagara Custom Expression; evaluated once per GPU particle in Spawn and Update.
+// Input comes from Particles.StyleType.
+// Output / DynamicMaterialParameter1:
+// (sin yaw, cos yaw, sin pitch, recoil normalized)
+float4(
+    sin(radians(-180.0 + 360.0 * float((asuint((Particles.StyleType == 0) ? 0x08080000 : Particles.StyleType) >> 8u) & 4095u) / 4095.0)),
+    cos(radians(-180.0 + 360.0 * float((asuint((Particles.StyleType == 0) ? 0x08080000 : Particles.StyleType) >> 8u) & 4095u) / 4095.0)),
+    sin(radians(-90.0 + 180.0 * float((asuint((Particles.StyleType == 0) ? 0x08080000 : Particles.StyleType) >> 20u) & 255u) / 255.0)),
+    float((asuint((Particles.StyleType == 0) ? 0x08080000 : Particles.StyleType) >> 28u) & 15u) / 15.0)

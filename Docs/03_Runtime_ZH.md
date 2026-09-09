@@ -38,7 +38,7 @@ FMBSTSingleTurretShared
 
 ## Processor
 
-`UMBSTSingleTurretPackProcessor` 在 `FrameEnd`、`MassBattleAgentRenderProcessor` 之前运行：
+`UMBSTSingleTurretPackProcessor` 在 `StartPhysics` 注册，但只在 MassBattle `PostCombat` 子帧进入查询；MassBattleFrame 1.19.7 的 Renderer 随后在 `TG_PostUpdateWork` 手动派发：
 
 ```text
 按共享限制 Clamp
@@ -48,6 +48,8 @@ FMBSTSingleTurretShared
 → 写入原 FStyleType.Index
 → 原 Renderer 上传 User.StyleArray
 ```
+
+帧分散开启时，它每个完整逻辑帧只扫描一次，而不是每个显示帧扫描一次。`MobileFire` 实体被排除在通用 Pack Query 外，直接在自己的 Combat chunk 尾部 cache-hot 打包，避免第二次全量遍历。所有插值和 Recoil 衰减使用 `GetCalculatedStepTime()`，不再使用显示帧 `World DeltaSeconds`。
 
 它不遍历 Actor 层级、不查 Host、不更新炮塔子 Entity，也不修改 MassBattleFrame Processor。
 

@@ -106,7 +106,15 @@ RTS 手动验证关卡：
 /MassBattleSingleTurret/Demo/RTS/Map_MBST_RTS_MobileFire
 ```
 
-手动 RTS 关卡现在只生成双方的 `AimAndFireWhileMoving` Mass 炮塔坦克；无炮塔、停车型和 Actor 坦克生成器已从该关卡移除，避免重复和误选。框选后会在屏幕及 Output Log 打印一次变化诊断：
+手动 RTS 关卡复制自 MassBattleFrame 的 `GameMap_RTS`，保留原生 RTS 相机、框选和右键移动。默认生成 `5,000` 己方 + `5,000` 敌方 `AimAndFireWhileMoving` 单实体 GPU 炮塔坦克；原图的 6 个 Soldier/Tank/Helicopter Spawner 已从复制地图移除，避免旧单位或损坏的 `_Trash` AgentConfig 混入。万人默认关闭逐发 Debug Tracer、世界标签和范围圈，这些调试绘制不是炮塔参数链的一部分，开启后会形成显著的 CPU/绘制次级成本。
+
+两军使用 `500 cm` 阵距并分置于地图两侧。运行时验证标记应为：
+
+```text
+MBST_RTS_MOBILE_FIRE_READY: success=1 moving_fire_only=1 player_stop=0 player_move=5000 enemy=5000 ... native_rts_commands=1 turret_profiles_chassis_aim=0
+```
+
+框选后会在屏幕及 Output Log 打印一次变化诊断：
 
 ```text
 MBST_RTS_SELECTION: selected=... | stop_to_fire=... moving_fire=... no_turret=... actor_compound=... | move_order=... attack_move=... free=...

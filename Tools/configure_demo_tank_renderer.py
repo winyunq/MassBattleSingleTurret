@@ -21,10 +21,17 @@ def main():
     config = unreal.load_asset(CONFIG_PATH)
     layout = unreal.load_asset(LAYOUT_PATH)
     renderer_blueprint = unreal.load_asset(RENDERER_PATH)
-    renderer_class = unreal.EditorAssetLibrary.load_blueprint_class(RENDERER_PATH)
     niagara = unreal.load_asset(NIAGARA_PATH)
-    if not all((config, layout, renderer_blueprint, renderer_class, niagara)):
+    if not all((config, layout, renderer_blueprint, niagara)):
         raise RuntimeError("Demo config/layout/renderer/Niagara asset is missing")
+
+    unreal.BlueprintEditorLibrary.reparent_blueprint(
+        renderer_blueprint,
+        unreal.MBSTSingleTurretRenderer,
+    )
+    renderer_class = unreal.EditorAssetLibrary.load_blueprint_class(RENDERER_PATH)
+    if not renderer_class:
+        raise RuntimeError("Could not load the reparented performance renderer class")
 
     configured, message = _message_result(
         unreal.MBSTSingleTurretEditorLibrary.configure_mass_battle_renderer_class(
@@ -56,7 +63,7 @@ def main():
 
     asset_subsystem = unreal.get_editor_subsystem(unreal.EditorAssetSubsystem)
     if not asset_subsystem.save_loaded_assets(
-        [config, renderer_blueprint, niagara],
+        [config, layout.get_editor_property("articulated_mesh"), renderer_blueprint, niagara],
         False,
     ):
         raise RuntimeError("Could not save the demo renderer contract")

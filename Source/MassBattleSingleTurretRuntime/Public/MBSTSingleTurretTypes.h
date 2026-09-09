@@ -49,7 +49,7 @@ struct MASSBATTLESINGLETURRETRUNTIME_API FMBSTSingleTurretState : public FA_Mass
 
     /**
      * When true, another plugin processor owns CurrentYaw/CurrentPitch/Recoil updates.
-     * The FrameEnd pack processor then performs serialization only, keeping CPU muzzle
+     * The logic pack processor then performs serialization only, keeping CPU muzzle
      * state and the GPU pose on the same simulation sample.
      */
     UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "MassBattle|Single Turret")
@@ -187,6 +187,39 @@ namespace MBSTPacking
         OutYawDegrees = DequantizeRange(YawQ, -180.0f, 180.0f, YawMask);
         OutPitchDegrees = DequantizeRange(PitchQ, -90.0f, 90.0f, PitchMask);
         OutRecoilNormalized = DequantizeRange(RecoilQ, 0.0f, 1.0f, RecoilMask);
+    }
+
+    /** Canonical hot-path clamp and serialization shared by every turret motion driver. */
+    FORCEINLINE int32 SanitizeAndPack(
+        FMBSTSingleTurretState& State,
+        const FMBSTSingleTurretShared& Shared)
+    {
+        if (!State.bArticulationEnabled)
+        {
+            State.CurrentYawDegrees = 0.0f;
+            State.CurrentPitchDegrees = 0.0f;
+            State.RecoilNormalized = 0.0f;
+        }
+
+        const float MinYaw = FMath::Min(Shared.YawLimitsDegrees.X, Shared.YawLimitsDegrees.Y);
+        const float MaxYaw = FMath::Max(Shared.YawLimitsDegrees.X, Shared.YawLimitsDegrees.Y);
+        const float MinPitch = FMath::Min(Shared.PitchLimitsDegrees.X, Shared.PitchLimitsDegrees.Y);
+        const float MaxPitch = FMath::Max(Shared.PitchLimitsDegrees.X, Shared.PitchLimitsDegrees.Y);
+
+        State.CurrentYawDegrees = FMath::Clamp(
+            FMath::UnwindDegrees(State.CurrentYawDegrees),
+            MinYaw,
+            MaxYaw);
+        State.CurrentPitchDegrees = Shared.bHasBarrelPitch
+            ? FMath::Clamp(State.CurrentPitchDegrees, MinPitch, MaxPitch)
+            : 0.0f;
+        State.RecoilNormalized = FMath::Clamp(State.RecoilNormalized, 0.0f, 1.0f);
+
+        return Pack(
+            static_cast<int32>(State.VisualStyle),
+            State.CurrentYawDegrees,
+            State.CurrentPitchDegrees,
+            State.RecoilNormalized);
     }
 }
 
