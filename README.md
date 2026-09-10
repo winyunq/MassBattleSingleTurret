@@ -4,7 +4,11 @@
 
 👉 **[中文文档 / Read in Chinese (README_ZH.md)](README_ZH.md)**
 
-Current version: **0.2.2-mobile-fire**. This version retains masked WPO depth
+Current version: **0.2.3-mobile-fire**. Aim and muzzle reconstruction now use the
+rendered mesh root, including the collider foot offset. See the
+[production aim/fire validation](Docs/AimBeforeFireValidation.md).
+
+The material fix retains masked WPO depth
 shader permutations, uses the framework's current DP0 decoder, and preserves
 source UV channels during conversion. Existing project copies of the material
 must also be upgraded; updating the plugin template alone does not update them.

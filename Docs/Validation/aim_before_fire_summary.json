@@ -1,0 +1,24 @@
+{
+  "map": "/Game/Map/EastAsia/64",
+  "formal_unit_types": 14,
+  "observed_turrets": 30,
+  "actual_projectile_shots": 2266,
+  "projectile_spawn_failures": 0,
+  "last_game_seconds": 182.62089464440942,
+  "before": {
+    "samples": 1069,
+    "median_ray_angle_deg": 10.482987586001249,
+    "max_ray_angle_deg": 15.14272889007391
+  },
+  "after": {
+    "samples": 2266,
+    "median_ray_angle_deg": 0.18828021663688288,
+    "max_ray_angle_deg": 5.860993704397655
+  },
+  "native_niagara_input_readback": {
+    "entities": 30,
+    "max_muzzle_position_difference_cm": 0.264681926158297
+  },
+  "target_override_samples": 0,
+  "caveat": "Ray angles reconstruct the packed mesh pose at the shot simulation sample; native array readback validates render inputs, not final interpolated GPU pixels. Temporary fixtures use original configs and the normal Tick-0 UnitHere spawn; only health and observation flags differ."
+}

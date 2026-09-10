@@ -14,6 +14,7 @@
 #include "Fragments/Health.h"
 #include "Fragments/Move.h"
 #include "Fragments/Network.h"
+#include "Fragments/Render.h"
 #include "Fragments/StyleType.h"
 #include "Fragments/Trace.h"
 #include "Fragments/Transform.h"
@@ -85,17 +86,6 @@ namespace MBSTMobileFirePrivate
         const float SinAngle = FVector::DotProduct(SafeAxis, FVector::CrossProduct(SafeFrom, SafeTo));
         const float CosAngle = FMath::Clamp(FVector::DotProduct(SafeFrom, SafeTo), -1.0f, 1.0f);
         return FMath::RadiansToDegrees(FMath::Atan2(SinAngle, CosAngle));
-    }
-
-    static FTransform MakeRootWorldTransform(
-        const FLocating& Locating,
-        const FRotating& Rotating,
-        const FScaling& Scaling)
-    {
-        return FTransform(
-            FQuat(Rotating.RotationQuat),
-            Locating.Location,
-            FVector(Scaling.Scale));
     }
 
     static FAimSolution ComputeDesiredTurretAim(
@@ -676,7 +666,7 @@ void UMBSTMobileFireCombatProcessor::ConfigureQueries(
 {
     FEntityQueryBuilder(EntityQuery)
         .All<FMBSTSingleTurretTag, FMBSTMobileFireTag>()
-        .All<FLocating, FScaling, FCollider, FMove, FMoving, FTracing>(MARO)
+        .All<FLocating, FScaling, FCollider, FMove, FMoving, FTracing, FVisualize>(MARO)
         .All<FRotating, FStyleType, FMBSTSingleTurretState, FMBSTMobileFireState>(MARW)
         .All<FMBSTSingleTurretShared, FMBSTMobileFireShared>(MARO)
         .RegisterWithProcessor(*this);
@@ -726,6 +716,7 @@ void UMBSTMobileFireCombatProcessor::Execute(
         TConstArrayView<FMove> Moves = ChunkContext.GetFragmentView<FMove>();
         TConstArrayView<FMoving> Movings = ChunkContext.GetFragmentView<FMoving>();
         TConstArrayView<FTracing> Tracings = ChunkContext.GetFragmentView<FTracing>();
+        TConstArrayView<FVisualize> Visualizes = ChunkContext.GetFragmentView<FVisualize>();
         TArrayView<FRotating> Rotations = ChunkContext.GetMutableFragmentView<FRotating>();
         TArrayView<FMBSTMobileFireState> FireStates =
             ChunkContext.GetMutableFragmentView<FMBSTMobileFireState>();
@@ -738,6 +729,7 @@ void UMBSTMobileFireCombatProcessor::Execute(
             const FMove& Move = Moves[EntityIndex];
             const FMoving& Moving = Movings[EntityIndex];
             const FTracing& Tracing = Tracings[EntityIndex];
+            const FVisualize& Visualize = Visualizes[EntityIndex];
             FRotating& Rotating = Rotations[EntityIndex];
             FMBSTSingleTurretState& TurretState = TurretStates[EntityIndex];
             FMBSTMobileFireState& FireState = FireStates[EntityIndex];
@@ -818,10 +810,8 @@ void UMBSTMobileFireCombatProcessor::Execute(
                         DeltaSeconds);
 
                     // Policy 1 owns horizontal aim with the chassis. The barrel may still pitch.
-                    const FTransform RootWorld = MBSTMobileFirePrivate::MakeRootWorldTransform(
-                        Locating,
-                        Rotating,
-                        Scaling);
+                    const FTransform RootWorld = UMBSTSingleTurretAsset::CalculateMeshRootWorldTransform(
+                        Locating, Rotating, Scaling, &Collider, &Move, &Moving, &Visualize);
                     const MBSTMobileFirePrivate::FAimSolution Aim =
                         MBSTMobileFirePrivate::ComputeDesiredTurretAim(
                             *TurretShared.Layout,
@@ -842,10 +832,8 @@ void UMBSTMobileFireCombatProcessor::Execute(
                 }
                 else
                 {
-                    const FTransform RootWorld = MBSTMobileFirePrivate::MakeRootWorldTransform(
-                        Locating,
-                        Rotating,
-                        Scaling);
+                    const FTransform RootWorld = UMBSTSingleTurretAsset::CalculateMeshRootWorldTransform(
+                        Locating, Rotating, Scaling, &Collider, &Move, &Moving, &Visualize);
                     const MBSTMobileFirePrivate::FAimSolution Aim =
                         MBSTMobileFirePrivate::ComputeDesiredTurretAim(
                             *TurretShared.Layout,
@@ -970,10 +958,8 @@ void UMBSTMobileFireCombatProcessor::Execute(
                 continue;
             }
 
-            const FTransform RootWorld = MBSTMobileFirePrivate::MakeRootWorldTransform(
-                Locating,
-                Rotating,
-                Scaling);
+            const FTransform RootWorld = UMBSTSingleTurretAsset::CalculateMeshRootWorldTransform(
+                Locating, Rotating, Scaling, &Collider, &Move, &Moving, &Visualize);
             const float PreShotRecoil = TurretState.RecoilNormalized;
             const FTransform MuzzleWorld =
                 TurretShared.Layout->CalculateMuzzleWorldTransform(

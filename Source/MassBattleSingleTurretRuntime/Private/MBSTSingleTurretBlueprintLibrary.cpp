@@ -9,6 +9,8 @@
 #include "Fragments/Attack.h"
 #include "Fragments/Chase.h"
 #include "Fragments/Move.h"
+#include "Fragments/Collider.h"
+#include "Fragments/Render.h"
 #include "Fragments/Transform.h"
 #include "FuncLibs/MassBattleFuncLib.h"
 #include "MassAPISubsystem.h"
@@ -146,22 +148,13 @@ namespace MBSTBlueprintPrivate
             return false;
         }
 
-        float UniformScale = 1.0f;
-        if (const FScaling* Scaling = MassAPI.GetFragmentPtr<FScaling>(Agent))
-        {
-            UniformScale = Scaling->Scale;
-        }
-
-        const FQuat RootRotation(
-            static_cast<double>(Rotation->RotationQuat.X),
-            static_cast<double>(Rotation->RotationQuat.Y),
-            static_cast<double>(Rotation->RotationQuat.Z),
-            static_cast<double>(Rotation->RotationQuat.W));
-
-        OutRootTransform = FTransform(
-            RootRotation,
-            Location->Location,
-            FVector(UniformScale));
+        const FScaling* Scaling = MassAPI.GetFragmentPtr<FScaling>(Agent);
+        OutRootTransform = UMBSTSingleTurretAsset::CalculateMeshRootWorldTransform(
+            *Location, *Rotation, Scaling ? *Scaling : FScaling(),
+            MassAPI.GetFragmentPtr<FCollider>(Agent),
+            MassAPI.GetFragmentPtr<FMove>(Agent),
+            MassAPI.GetFragmentPtr<FMoving>(Agent),
+            MassAPI.GetFragmentPtr<FVisualize>(Agent));
         return true;
     }
 }

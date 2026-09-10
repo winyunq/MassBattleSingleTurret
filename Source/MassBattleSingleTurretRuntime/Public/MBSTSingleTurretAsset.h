@@ -7,6 +7,13 @@
 
 class UAnimToTextureDataAsset;
 class UStaticMesh;
+struct FLocating;
+struct FRotating;
+struct FScaling;
+struct FCollider;
+struct FMove;
+struct FMoving;
+struct FVisualize;
 
 /** Generated description of one single-agent articulated vehicle mesh. */
 UCLASS(BlueprintType)
@@ -15,6 +22,16 @@ class MASSBATTLESINGLETURRETRUNTIME_API UMBSTSingleTurretAsset : public UDataAss
     GENERATED_BODY()
 
 public:
+    /** Mesh-space joints must use the particle mesh root, not the collision center. */
+    static FTransform CalculateMeshRootWorldTransform(
+        const FLocating& Location,
+        const FRotating& Rotation,
+        const FScaling& Scaling,
+        const FCollider* Collider,
+        const FMove* Move,
+        const FMoving* Moving,
+        const FVisualize* Visualize);
+
     UPROPERTY(BlueprintReadOnly, EditAnywhere, Category = "Generated")
     TObjectPtr<UStaticMesh> ArticulatedMesh = nullptr;
 

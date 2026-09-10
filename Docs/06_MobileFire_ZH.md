@@ -53,14 +53,19 @@ Profile 被编辑后，应再次执行 Configure，让 AgentConfig 中的缓存�
 原 Processor 必须保持启用，插件没有复制它们：
 
 ```text
-MBST Movement Gate
+MassBattle Trace / Behavior（Stage 0，Subtick1）
+  -> MBST Mobile Fire Combat
+  -> MassBattle 后续模拟阶段
+  -> MBST Movement Gate（移动阶段，分批执行）
   -> MassBattle Move
   -> MBST Movement Gate Restore
-  -> MassBattle Trace
-  -> MassBattle Behavior
-  -> MBST Mobile Fire Combat
-  -> MBST Turret Pack (FrameEnd)
+  -> MassBattle Render（后续渲染采样）
 ```
+
+Combat 在其模拟采样上重新检查瞄准误差，通过门槛后才创建炮弹。
+它不等待 GPU 插值完成。0.2.3 已让瞄准、炮口和 Blueprint 姿态查询使用与
+原生粒子模型一致的底部偏移、倾斜与模型根坐标；验证数据见
+[正式坦克瞄准与开火验证](AimBeforeFireValidation.md)。
 
 Combat 默认读取 `FTracing::TraceResult` 作为目标。也可对单个实体调用：
 
