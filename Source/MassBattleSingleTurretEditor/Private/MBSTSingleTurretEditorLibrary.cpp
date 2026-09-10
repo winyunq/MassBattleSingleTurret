@@ -1,6 +1,7 @@
 #include "MBSTSingleTurretEditorLibrary.h"
 
 #include "MassBattleSingleTurretEditor.h"
+#include "MBSTMaskedDepthMaterial.h"
 #include "MBSTMobileFireProfile.h"
 #include "MBSTSingleTurretAsset.h"
 #include "MBSTSingleTurretAuthoringComponent.h"
@@ -55,6 +56,61 @@
 
 namespace MBSTEditorPrivate
 {
+    static bool UpgradeMassBattleMaterialDecode(UMaterial* Material, FString& OutMessage)
+    {
+        // The copied VAT master predates the framework's DP0.w layout change.
+        // Keep its output pins/wiring, but use the framework's canonical decoder.
+        for (UMaterialExpression* Expression : Material->GetExpressions())
+        {
+            UMaterialExpressionCustom* Custom = Cast<UMaterialExpressionCustom>(Expression);
+            if (!Custom || Custom->AdditionalOutputs.Num() != 6)
+            {
+                continue;
+            }
+            const FName OutputNames[] = {
+                TEXT("Team"), TEXT("Dissolve"), TEXT("LODIndex"),
+                TEXT("DrawLOD"), TEXT("BeingSelect"), TEXT("Selected")
+            };
+            bool bMatchesDP0 = Custom->Inputs.Num() == 1
+                && Custom->Inputs[0].InputName == TEXT("In");
+            for (int32 Index = 0; Index < UE_ARRAY_COUNT(OutputNames); ++Index)
+            {
+                bMatchesDP0 &= Custom->AdditionalOutputs[Index].OutputName == OutputNames[Index];
+            }
+            if (!bMatchesDP0)
+            {
+                continue;
+            }
+
+            const FString DecodeCode = TEXT("MassBattle_UnpackDP0W(In, Team, Dissolve, LODIndex, DrawLOD, BeingSelect, Selected);\nreturn 0.0;");
+            const FString IncludePath = TEXT("/MassBattle/MassBattle_MaterialDecode.ush");
+            if (Custom->Code == DecodeCode && Custom->IncludeFilePaths.Contains(IncludePath))
+            {
+                continue;
+            }
+            const FString PreviousCode = Custom->Code;
+            const TArray<FString> PreviousIncludes = Custom->IncludeFilePaths;
+            Material->Modify();
+            Custom->Modify();
+            Custom->Code = DecodeCode;
+            Custom->IncludeFilePaths.AddUnique(IncludePath);
+            Material->PostEditChange();
+            const TArray<FString> Errors = UMaterialEditingLibrary::RecompileMaterial(Material);
+            if (!Errors.IsEmpty())
+            {
+                Custom->Code = PreviousCode;
+                Custom->IncludeFilePaths = PreviousIncludes;
+                Material->PostEditChange();
+                UMaterialEditingLibrary::RecompileMaterial(Material);
+                OutMessage = FString::Printf(TEXT("MassBattle DP0 decoder did not compile: %s"),
+                    *FString::Join(Errors, TEXT(" | ")));
+                return false;
+            }
+            Material->MarkPackageDirty();
+        }
+        return true;
+    }
+
     struct FGatheredActor
     {
         TArray<USceneComponent*> SceneComponents;
@@ -512,7 +568,9 @@ namespace MBSTEditorPrivate
             }
 
             FStaticMeshAttributes Attributes(*MeshDescription);
-            Attributes.Register();
+            // RawMesh conversion can retain more instance UV channels than UV
+            // element channels. Re-registering existing attributes truncates them.
+            Attributes.Register(true);
             TVertexInstanceAttributesRef<FVector4f> Colors = Attributes.GetVertexInstanceColors();
             if (!Colors.IsValid())
             {
@@ -1993,6 +2051,15 @@ bool UMBSTSingleTurretEditorLibrary::ConfigureArticulationBaseMaterial(
     if (!IsValid(Material))
     {
         OutMessage = TEXT("Material is invalid.");
+        return false;
+    }
+
+    if (!MBSTEditorPrivate::UpgradeMassBattleMaterialDecode(Material, OutMessage))
+    {
+        return false;
+    }
+    if (!MBSTEditorPrivate::EnsureMaskedDepthMaterial(Material, OutMessage))
+    {
         return false;
     }
 

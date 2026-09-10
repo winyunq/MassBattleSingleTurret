@@ -2,6 +2,10 @@
 
 `MassBattleSingleTurret` 是专为 Unreal Engine 5.8 + MassBattle 框架设计的独立插件。它能够将任意基于 Actor/Component 组件化装配的坦克或载具，转换为**单实体 (Single Mass Entity) + 单 Niagara 粒子 + 单合并 VAT 静态网格**的无 Actor 炮塔单位。
 
+当前版本：**0.2.2-mobile-fire**。此版本修正 Masked 材质的炮塔深度绘制，
+同步框架 DP0 解码，并保留转换前的 UV 通道。项目里已经复制出来的材质也需要升级；
+只更新插件模板不会自动修正这些副本。详见[黑炮塔原因与材质升级](Docs/BlackTurretFix.md)。
+
 ---
 
 ## 🌟 核心优势

@@ -161,10 +161,13 @@ def check_source_contract() -> None:
     blueprint = (SOURCE_ROOT / "MassBattleSingleTurretRuntime/Private/MBSTSingleTurretBlueprintLibrary.cpp").read_text(encoding="utf-8")
     editor = (SOURCE_ROOT / "MassBattleSingleTurretEditor/Private/MBSTSingleTurretEditorLibrary.cpp").read_text(encoding="utf-8")
     require("ProcessingPhase = EMassProcessingPhase::StartPhysics" in processor, "Logic pack must run before MassBattle's manual renderer tick group")
-    require("IsSubFrameScheduled(ESubFrame::PostCombat)" in processor, "Logic pack must be gated to one PostCombat sample")
+    require("IsSubFrameScheduled(ESubFrame::Subtick3)" in processor, "Logic pack must be gated to the framework's Subtick3 sample")
     require(".None<FMBSTMobileFireTag>()" in processor, "MobileFire must not pay the generic pack scan")
     require("Styles[EntityIndex].Index = MBSTPacking::SanitizeAndPack" in processor, "Canonical StyleArray packing write is missing")
-    require("SetSharedFragment<FMBSTSingleTurretShared>" in blueprint, "Template shared layout replacement is missing")
+    require("RemoveSharedFragment<FMBSTSingleTurretShared>(ClonedTemplate)" in blueprint
+            and "ClonedTemplate.AddSharedFragment(" in blueprint
+            and "GetOrCreateSharedFragment(Shared)" in blueprint,
+            "Template shared layout must be replaced through the current MassAPI contract")
     require("DataAsset->SkeletalMesh =" in editor and "DataAsset->StaticMesh =" in editor, "VAT mesh assignment is missing")
     require("PaintVertexMask(BodyMesh" in editor and "PaintVertexMask(TurretMesh" in editor, "Articulation mask generation is missing")
     require("CreateSingleTurretAgentConfigFromTemplate(" in editor, "Actor conversion does not create a turret AgentConfig")

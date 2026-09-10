@@ -4,6 +4,12 @@
 
 👉 **[中文文档 / Read in Chinese (README_ZH.md)](README_ZH.md)**
 
+Current version: **0.2.2-mobile-fire**. This version retains masked WPO depth
+shader permutations, uses the framework's current DP0 decoder, and preserves
+source UV channels during conversion. Existing project copies of the material
+must also be upgraded; updating the plugin template alone does not update them.
+See [material upgrade and black-turret diagnosis](Docs/BlackTurretFix.md).
+
 ---
 
 ## 🌟 Key Advantages

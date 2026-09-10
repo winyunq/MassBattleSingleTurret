@@ -1,4 +1,5 @@
 #include "MBSTSingleTurretEditorLibrary.h"
+#include "MBSTMaskedDepthMaterial.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 
@@ -17,6 +18,14 @@
 #include "Fragments/Team.h"
 #include "HAL/PlatformTime.h"
 #include "Materials/Material.h"
+#include "MaterialEditingLibrary.h"
+#include "MaterialShared.h"
+#include "Materials/MaterialExpressionConstant.h"
+#include "Materials/MaterialExpressionConstant3Vector.h"
+#include "Materials/MaterialExpressionCustom.h"
+#include "Materials/MaterialExpressionGetMaterialAttributes.h"
+#include "Materials/MaterialExpressionSetMaterialAttributes.h"
+#include "Materials/MaterialExpressionStaticSwitchParameter.h"
 #include "MeshDescription.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/FileHelper.h"
@@ -25,12 +34,364 @@
 #include "NiagaraMeshRendererProperties.h"
 #include "NiagaraSystem.h"
 #include "StaticMeshAttributes.h"
+#include "StaticMeshResources.h"
+#include "RHI.h"
 #include "Subsystems/EditorAssetSubsystem.h"
 #include "UObject/GarbageCollection.h"
 #include "UObject/UObjectIterator.h"
+#include "UObject/StrongObjectPtr.h"
 #include "Editor.h"
 #include "FileHelpers.h"
 #include "GameFramework/WorldSettings.h"
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FMBSTMaterialDecodeCompatibilityTest,
+    "MassBattle.SingleTurret.Material.FrameworkDecodeCompatibility",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMBSTMaterialDecodeCompatibilityTest::RunTest(const FString& Parameters)
+{
+    UMaterial* Source = LoadObject<UMaterial>(nullptr,
+        TEXT("/MassBattleSingleTurret/Materials/M_MBST_VATSingleTurret.M_MBST_VATSingleTurret"));
+    if (!TestNotNull(TEXT("Turret base material"), Source))
+    {
+        return false;
+    }
+    UMaterial* Material = DuplicateObject<UMaterial>(Source, GetTransientPackage());
+    UMaterialExpressionCustom* Decoder = nullptr;
+    for (UMaterialExpression* Expression : Material->GetExpressions())
+    {
+        UMaterialExpressionCustom* Custom = Cast<UMaterialExpressionCustom>(Expression);
+        if (Custom && Custom->AdditionalOutputs.Num() == 6
+            && Custom->AdditionalOutputs[0].OutputName == TEXT("Team"))
+        {
+            Decoder = Custom;
+            break;
+        }
+    }
+    if (!TestNotNull(TEXT("Framework DP0 decoder"), Decoder)
+        || !TestEqual(TEXT("Packed input count"), Decoder->Inputs.Num(), 1))
+    {
+        return false;
+    }
+    const FExpressionInput PackedInput = Decoder->Inputs[0].Input;
+    const int32 ExpressionCount = Material->GetExpressions().Num();
+    // Reproduce an asset copied before the framework changed its wire format.
+    Decoder->Code = TEXT("uint u = asuint(In); Team = float(u & 1023u); Dissolve = float((u >> 10u) & 1023u) / 1023.0; LODIndex = float((u >> 20u) & 511u); DrawLOD = float((u >> 29u) & 1u); BeingSelect = float((u >> 30u) & 1u); Selected = float((u >> 31u) & 1u); return 0.0;");
+    Decoder->IncludeFilePaths.Reset();
+    FString Message;
+    TestTrue(TEXT("Existing authoring entry upgrades and compiles the legacy decoder"),
+        UMBSTSingleTurretEditorLibrary::ConfigureArticulationBaseMaterial(Material, Message));
+    AddInfo(Message);
+    TestTrue(TEXT("Uses the framework's canonical decoder"), Decoder->Code.Contains(TEXT("MassBattle_UnpackDP0W(")));
+    TestTrue(TEXT("Includes the framework shader contract"),
+        Decoder->IncludeFilePaths.Contains(TEXT("/MassBattle/MassBattle_MaterialDecode.ush")));
+    TestTrue(TEXT("Preserves the packed parameter connection"),
+        Decoder->Inputs[0].Input.Expression == PackedInput.Expression
+        && Decoder->Inputs[0].Input.OutputIndex == PackedInput.OutputIndex);
+    const int32 MigratedExpressionCount = Material->GetExpressions().Num();
+    TestTrue(TEXT("Preserves the source graph while installing material compatibility expressions"),
+        MigratedExpressionCount >= ExpressionCount);
+    TestTrue(TEXT("Migration can run again"),
+        UMBSTSingleTurretEditorLibrary::ConfigureArticulationBaseMaterial(Material, Message));
+    TestEqual(TEXT("Migration does not duplicate graph nodes"), Material->GetExpressions().Num(), MigratedExpressionCount);
+    return !HasAnyErrors();
+}
+
+namespace MBSTMaskedDepthTests
+{
+    template<typename T>
+    T* AddExpression(UMaterial* Material)
+    {
+        return CastChecked<T>(UMaterialEditingLibrary::CreateMaterialExpression(Material, T::StaticClass()));
+    }
+
+    UMaterial* CreateSurface()
+    {
+        UMaterial* Material = NewObject<UMaterial>(GetTransientPackage(), NAME_None, RF_Transient);
+        Material->BlendMode = BLEND_Masked;
+        Material->bUsedWithNiagaraMeshParticles = true;
+        UMaterialExpressionConstant3Vector* Offset = AddExpression<UMaterialExpressionConstant3Vector>(Material);
+        Offset->Constant = FLinearColor(0.0f, 0.0f, 50.0f);
+        Material->GetEditorOnlyData()->WorldPositionOffset.Connect(0, Offset);
+        Material->GetEditorOnlyData()->WorldPositionOffset.UseConstant = false;
+        return Material;
+    }
+
+    bool CheckCompiledMaskUsage(FAutomationTestBase& Test, UMaterial* Material, bool bExpected)
+    {
+        FMaterialResource* Resource = Material->GetMaterialResource(GMaxRHIShaderPlatform);
+        if (!Test.TestNotNull(TEXT("Compiled material resource"), Resource))
+        {
+            return false;
+        }
+        Resource->FinishCompilation();
+        for (const FString& Error : Resource->GetCompileErrors())
+        {
+            Test.AddError(Error);
+        }
+        const FMaterialShaderMap* ShaderMap = Resource->GetGameThreadShaderMap();
+        if (!Test.TestNotNull(TEXT("Compiled material shader map"), ShaderMap))
+        {
+            return false;
+        }
+        Test.TestTrue(TEXT("Regression material displaces vertices in the depth and base passes"),
+            bool(ShaderMap->GetCompilationOutput().bUsesWorldPositionOffset));
+        return Test.TestEqual(TEXT("Compiler retains the opacity mask required by the runtime depth pass"),
+            bool(ShaderMap->GetCompilationOutput().bUsesOpacityMask), bExpected);
+    }
+
+    void Recompile(FAutomationTestBase& Test, UMaterial* Material)
+    {
+        for (const FString& Error : UMaterialEditingLibrary::RecompileMaterial(Material))
+        {
+            Test.AddError(Error);
+        }
+    }
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FMBSTMaskedDepthInputsTest,
+    "MassBattle.SingleTurret.Material.MaskedDepthInputs",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMBSTMaskedDepthInputsTest::RunTest(const FString& Parameters)
+{
+    // Cover both a dormant graph hidden by UseConstant and an unconnected default.
+    for (int32 CaseIndex = 0; CaseIndex < 3; ++CaseIndex)
+    {
+        TStrongObjectPtr<UMaterial> MaterialOwner(MBSTMaskedDepthTests::CreateSurface());
+        UMaterial* Material = MaterialOwner.Get();
+        UMaterialEditorOnlyData* Data = Material->GetEditorOnlyData();
+        const bool bInlineConstant = CaseIndex != 2;
+        const float EffectiveMask = CaseIndex == 1 ? 0.125f : 1.0f;
+        if (bInlineConstant)
+        {
+            UMaterialExpressionConstant* DormantMask = MBSTMaskedDepthTests::AddExpression<UMaterialExpressionConstant>(Material);
+            DormantMask->R = 0.75f;
+            Data->OpacityMask.Connect(0, DormantMask);
+        }
+        Data->OpacityMask.UseConstant = bInlineConstant;
+        Data->OpacityMask.Constant = EffectiveMask;
+        const FExpressionInput OriginalWPO = Data->WorldPositionOffset;
+        const float OriginalClip = Material->OpacityMaskClipValue;
+        MBSTMaskedDepthTests::Recompile(*this, Material);
+        MBSTMaskedDepthTests::CheckCompiledMaskUsage(*this, Material, EffectiveMask != 1.0f);
+
+        FString Message;
+        if (!TestTrue(TEXT("Installs masked depth compatibility"),
+                MBSTEditorPrivate::EnsureMaskedDepthMaterial(Material, Message)))
+        {
+            AddError(Message);
+            continue;
+        }
+        MBSTMaskedDepthTests::CheckCompiledMaskUsage(*this, Material, true);
+        TestFalse(TEXT("The root mask evaluates its new connection"), bool(Data->OpacityMask.UseConstant));
+        UMaterialExpressionCustom* Wrapper = Cast<UMaterialExpressionCustom>(Data->OpacityMask.Expression);
+        if (TestNotNull(TEXT("Final mask wrapper"), Wrapper)
+            && TestEqual(TEXT("One preserved mask input"), Wrapper->Inputs.Num(), 1))
+        {
+            UMaterialExpressionConstant* Constant = Cast<UMaterialExpressionConstant>(Wrapper->Inputs[0].Input.Expression);
+            if (TestNotNull(TEXT("Effective inline/default constant is preserved"), Constant))
+            {
+                TestEqual(TEXT("Mask value is unchanged, including values below the clipping threshold"), Constant->R, EffectiveMask);
+            }
+        }
+        TestEqual(TEXT("Preserves blend mode"), Material->BlendMode, TEnumAsByte<EBlendMode>(BLEND_Masked));
+        TestEqual(TEXT("Preserves opacity-mask clipping threshold"), Material->OpacityMaskClipValue, OriginalClip);
+        TestTrue(TEXT("Preserves the original WPO connection"), Data->WorldPositionOffset.Expression == OriginalWPO.Expression
+            && Data->WorldPositionOffset.OutputIndex == OriginalWPO.OutputIndex);
+        const int32 Count = Material->GetExpressions().Num();
+        TestTrue(TEXT("Repeated mask migration succeeds"), MBSTEditorPrivate::EnsureMaskedDepthMaterial(Material, Message));
+        TestEqual(TEXT("Repeated mask migration does not grow the graph"), Material->GetExpressions().Num(), Count);
+    }
+    return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FMBSTMaskedDepthAttributesTest,
+    "MassBattle.SingleTurret.Material.MaskedDepthAttributesAndSwitches",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMBSTMaskedDepthAttributesTest::RunTest(const FString& Parameters)
+{
+    TStrongObjectPtr<UMaterial> MaterialOwner(MBSTMaskedDepthTests::CreateSurface());
+    UMaterial* Material = MaterialOwner.Get();
+    UMaterialEditorOnlyData* Data = Material->GetEditorOnlyData();
+    Material->bUseMaterialAttributes = true;
+    UMaterialExpressionConstant* One = MBSTMaskedDepthTests::AddExpression<UMaterialExpressionConstant>(Material);
+    One->R = 1.0f;
+    UMaterialExpressionConstant* Cutout = MBSTMaskedDepthTests::AddExpression<UMaterialExpressionConstant>(Material);
+    Cutout->R = 0.125f;
+    UMaterialExpressionStaticSwitchParameter* Switch =
+        MBSTMaskedDepthTests::AddExpression<UMaterialExpressionStaticSwitchParameter>(Material);
+    Switch->ParameterName = TEXT("MBST_TestMaskSwitch");
+    Switch->ExpressionGUID = FGuid::NewGuid();
+    Switch->DynamicBranch = false;
+    Switch->DefaultValue = true;
+    Switch->A.Connect(0, One);
+    Switch->B.Connect(0, Cutout);
+    UMaterialExpressionSetMaterialAttributes* OriginalAttributes =
+        MBSTMaskedDepthTests::AddExpression<UMaterialExpressionSetMaterialAttributes>(Material);
+    OriginalAttributes->ConnectInputAttribute(MP_OpacityMask, Switch);
+    OriginalAttributes->ConnectInputAttribute(MP_WorldPositionOffset, Data->WorldPositionOffset.Expression);
+    Data->MaterialAttributes.Connect(0, OriginalAttributes);
+    MBSTMaskedDepthTests::Recompile(*this, Material);
+    MBSTMaskedDepthTests::CheckCompiledMaskUsage(*this, Material, false);
+
+    // Surface masters must also be prepared when currently opaque: a material
+    // instance can later select Masked without rebuilding the parent graph.
+    Material->BlendMode = BLEND_Opaque;
+    FString Message;
+    if (!TestTrue(TEXT("Installs compatibility on a surface master before a masked override"),
+            MBSTEditorPrivate::EnsureMaskedDepthMaterial(Material, Message)))
+    {
+        AddError(Message);
+        return false;
+    }
+    TestTrue(TEXT("Preserves material-attributes mode"), bool(Material->bUseMaterialAttributes));
+    TestEqual(TEXT("Does not force the master blend mode"), Material->BlendMode, TEnumAsByte<EBlendMode>(BLEND_Opaque));
+    UMaterialExpressionSetMaterialAttributes* FinalAttributes =
+        Cast<UMaterialExpressionSetMaterialAttributes>(Data->MaterialAttributes.Expression);
+    if (TestNotNull(TEXT("Final attributes wrapper"), FinalAttributes)
+        && TestEqual(TEXT("Only overrides the opacity mask"), FinalAttributes->Inputs.Num(), 2))
+    {
+        TestTrue(TEXT("All original material attributes are retained"), FinalAttributes->Inputs[0].Expression == OriginalAttributes);
+        UMaterialExpressionCustom* Wrapper = Cast<UMaterialExpressionCustom>(FinalAttributes->Inputs[1].Expression);
+        if (TestNotNull(TEXT("Final attributes mask wrapper"), Wrapper)
+            && TestEqual(TEXT("One original attributes mask input"), Wrapper->Inputs.Num(), 1))
+        {
+            UMaterialExpressionGetMaterialAttributes* Get =
+                Cast<UMaterialExpressionGetMaterialAttributes>(Wrapper->Inputs[0].Input.Expression);
+            if (TestNotNull(TEXT("Reads the final source attributes mask"), Get))
+            {
+                TestTrue(TEXT("Reads the same attributes that are passed through"), Get->MaterialAttributes.Expression == OriginalAttributes);
+            }
+        }
+    }
+    Material->BlendMode = BLEND_Masked;
+    MBSTMaskedDepthTests::Recompile(*this, Material);
+    MBSTMaskedDepthTests::CheckCompiledMaskUsage(*this, Material, true);
+    Switch->DefaultValue = false;
+    MBSTMaskedDepthTests::Recompile(*this, Material);
+    MBSTMaskedDepthTests::CheckCompiledMaskUsage(*this, Material, true);
+    TestTrue(TEXT("Preserves both static-switch mask branches"), Switch->A.Expression == One && Switch->B.Expression == Cutout);
+    TestEqual(TEXT("Preserves the cutout branch value"), Cutout->R, 0.125f);
+    const int32 Count = Material->GetExpressions().Num();
+    TestTrue(TEXT("Repeated attributes migration succeeds"), MBSTEditorPrivate::EnsureMaskedDepthMaterial(Material, Message));
+    TestEqual(TEXT("Repeated attributes migration does not grow the graph"), Material->GetExpressions().Num(), Count);
+    return !HasAnyErrors();
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+    FMBSTConversionPreservesSurfaceUVTest,
+    "MassBattle.SingleTurret.Authoring.PreservesSurfaceUVChannels",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMBSTConversionPreservesSurfaceUVTest::RunTest(const FString& Parameters)
+{
+    UStaticMesh* Cube = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+    if (!TestNotNull(TEXT("Source cube"), Cube)
+        || !TestNotNull(TEXT("Editor world"), GEditor ? GEditor->GetEditorWorldContext().World() : nullptr))
+    {
+        return false;
+    }
+
+    const FVector2f SurfaceUVs[] = {
+        FVector2f(0.125f, 0.875f),
+        FVector2f(0.375f, 0.625f),
+        FVector2f(0.75f, 0.25f)
+    };
+    UStaticMesh* Parts[3] = {};
+    for (int32 PartIndex = 0; PartIndex < UE_ARRAY_COUNT(Parts); ++PartIndex)
+    {
+        UStaticMesh* Part = DuplicateObject<UStaticMesh>(Cube, GetTransientPackage());
+        Parts[PartIndex] = Part;
+        FMeshDescription* Description = Part ? Part->GetMeshDescription(0) : nullptr;
+        if (!TestNotNull(TEXT("Editable source part"), Description))
+        {
+            return false;
+        }
+        FStaticMeshAttributes Attributes(*Description);
+        Attributes.Register(true);
+        Description->SetNumUVChannels(2);
+        TVertexInstanceAttributesRef<FVector2f> UVs = Attributes.GetVertexInstanceUVs();
+        UVs.SetNumChannels(2);
+        for (const FVertexInstanceID Vertex : Description->VertexInstances().GetElementIDs())
+        {
+            UVs.Set(Vertex, 1, SurfaceUVs[PartIndex]);
+        }
+        Part->GetSourceModel(0).BuildSettings.bGenerateLightmapUVs = false;
+        Part->CommitMeshDescription(0);
+        Part->Build(false);
+        if (!TestEqual(TEXT("Source render data retains UV0 and UV1"),
+            Part->GetRenderData()->LODResources[0].VertexBuffers.StaticMeshVertexBuffer.GetNumTexCoords(), 2u))
+        {
+            return false;
+        }
+    }
+
+    FMBSTActorToSingleTurretSettings Settings;
+    Settings.bGenerateLightmapUVs = false;
+    Settings.bCreateVATDataAsset = false;
+    Settings.bCreatePivotSockets = false;
+    const FString OutputRoot = TEXT("/Game/Developers/MBSTSurfaceUVTest/") + FGuid::NewGuid().ToString(EGuidFormats::Digits);
+    const FMBSTActorToSingleTurretResult Result =
+        UMBSTSingleTurretEditorLibrary::ConvertStaticMeshesToSingleTurret(
+            Parts[0], Parts[1], Parts[2], nullptr,
+            FVector::ZeroVector, FVector(25.0, 0.0, 25.0), FVector(100.0, 0.0, 25.0),
+            0.0f, 45.0f, 30.0f, OutputRoot, TEXT("SurfaceUVTank"), Settings);
+    ON_SCOPE_EXIT
+    {
+        UObject* GeneratedAssets[] = { Result.ArticulatedMesh.Get(), Result.LayoutAsset.Get(), Result.AgentConfig.Get() };
+        for (UObject* Asset : GeneratedAssets)
+        {
+            if (Asset)
+            {
+                FAssetRegistryModule::AssetDeleted(Asset);
+                Asset->ClearFlags(RF_Public | RF_Standalone);
+                Asset->GetOutermost()->SetDirtyFlag(false);
+            }
+        }
+    };
+    for (const FString& Message : Result.Messages)
+    {
+        AddInfo(Message);
+    }
+    if (!TestTrue(TEXT("Public mechanical conversion succeeds"), Result.bSucceeded)
+        || !TestNotNull(TEXT("Generated mesh"), Result.ArticulatedMesh.Get()))
+    {
+        return false;
+    }
+    const FMeshDescription* Description = Result.ArticulatedMesh->GetMeshDescription(0);
+    if (!TestNotNull(TEXT("Generated mesh description"), Description))
+    {
+        return false;
+    }
+    const FStaticMeshConstAttributes Attributes(*Description);
+    const TVertexInstanceAttributesConstRef<FVector2f> UVs = Attributes.GetVertexInstanceUVs();
+    // RawMesh conversion has one UV element channel. Re-registering attributes
+    // during mask painting used to truncate its two vertex-instance UV channels.
+    if (!TestEqual(TEXT("Articulation mask painting preserves both surface UV channels"), UVs.GetNumChannels(), 2))
+    {
+        return false;
+    }
+    TestEqual(TEXT("Generated render buffer also retains both surface UV channels"),
+        Result.ArticulatedMesh->GetRenderData()->LODResources[0].VertexBuffers.StaticMeshVertexBuffer.GetNumTexCoords(), 2u);
+    const TVertexInstanceAttributesConstRef<FVector4f> Colors = Attributes.GetVertexInstanceColors();
+    int32 Counts[3] = {};
+    bool bAllSurfaceUVsPreserved = true;
+    for (const FVertexInstanceID Vertex : Description->VertexInstances().GetElementIDs())
+    {
+        const FVector4f Mask = Colors[Vertex];
+        const int32 PartIndex = Mask.X < 0.5f ? 0 : (Mask.Y < 0.5f ? 1 : 2);
+        ++Counts[PartIndex];
+        bAllSurfaceUVsPreserved &= UVs.Get(Vertex, 1).Equals(SurfaceUVs[PartIndex], 0.0001f);
+    }
+    TestTrue(TEXT("All body, turret and barrel UV1 values survive conversion"), bAllSurfaceUVsPreserved);
+    TestTrue(TEXT("UV verification covers all three articulation masks"), Counts[0] > 0 && Counts[1] > 0 && Counts[2] > 0);
+    return !HasAnyErrors();
+}
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
     FMBSTMobileFireAgentConfigContractTest,

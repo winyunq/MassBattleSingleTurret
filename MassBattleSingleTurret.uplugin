@@ -1,7 +1,7 @@
 {
   "FileVersion": 3,
-  "Version": 20100,
-  "VersionName": "0.2.1-mobile-fire",
+  "Version": 20200,
+  "VersionName": "0.2.2-mobile-fire",
   "FriendlyName": "MassBattle Single Turret",
   "Description": "Single-entity GPU turret articulation, Actor-to-VAT authoring, and per-unit stop-to-fire or fire-while-moving attack-move for MassBattle vehicles.",
   "Category": "MassBattle",
