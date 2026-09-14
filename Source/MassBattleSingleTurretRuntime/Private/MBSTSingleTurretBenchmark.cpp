@@ -409,8 +409,8 @@ void AMBSTSingleTurretBenchmarkActor::BeginPlay()
             1.0f / LogicHz,
             0.0f,
             bUseFrameSpreading,
-            false,
             false);
+        MassBattle->bUseFixPointMath = false;
         UE_LOG(LogTemp, Display,
             TEXT("MBST_BENCHMARK_SIM_PROFILE: logic_hz=%.2f frame_spreading=%d"),
             LogicHz,
