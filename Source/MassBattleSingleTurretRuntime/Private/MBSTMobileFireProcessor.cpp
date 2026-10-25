@@ -23,6 +23,8 @@
 #include "Subsystems/MassBattleProjectileSubsystem.h"
 #include "Subsystems/MassBattleSubsystem.h"
 #include "Subsystems/MassBattleNetworkSubsystem.h"
+#include "Rendering/MassBattleAgentRenderer.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 #include "Misc/AutomationTest.h"
@@ -560,7 +562,7 @@ void UMBSTMobileFireMovementGateProcessor::Execute(
         return;
     }
 
-    EntityQuery.ForEachEntityChunk(Context, [](FMassExecutionContext& ChunkContext)
+     MBForEachEntityChunk<true>( EntityQuery,Context, [](FMassExecutionContext& ChunkContext)
     {
         TArrayView<FMove> Moves = ChunkContext.GetMutableFragmentView<FMove>();
         TConstArrayView<FMoving> Movings = ChunkContext.GetFragmentView<FMoving>();
@@ -586,7 +588,7 @@ void UMBSTMobileFireMovementGateProcessor::Execute(
                 State.bSavedStopActiveMovement
                 || MBSTMobileFirePrivate::ShouldApplyMovementHold(State, Moving);
         }
-    });
+    } , FMassEntityQuery::EParallelExecutionFlags::AutoBalance );
 }
 
 UMBSTMobileFireMovementGateRestoreProcessor::UMBSTMobileFireMovementGateRestoreProcessor()
@@ -627,7 +629,7 @@ void UMBSTMobileFireMovementGateRestoreProcessor::Execute(
         return;
     }
 
-    EntityQuery.ForEachEntityChunk(Context, [](FMassExecutionContext& ChunkContext)
+     MBForEachEntityChunk<true>( EntityQuery,Context, [](FMassExecutionContext& ChunkContext)
     {
         TArrayView<FMove> Moves = ChunkContext.GetMutableFragmentView<FMove>();
         TArrayView<FMBSTMobileFireState> FireStates =
@@ -644,7 +646,7 @@ void UMBSTMobileFireMovementGateRestoreProcessor::Execute(
             Moves[EntityIndex].XY.bStopActiveMovement = State.bSavedStopActiveMovement;
             State.bMovementGateAppliedThisStep = false;
         }
-    });
+    } , FMassEntityQuery::EParallelExecutionFlags::AutoBalance );
 }
 
 UMBSTMobileFireCombatProcessor::UMBSTMobileFireCombatProcessor()
@@ -687,12 +689,55 @@ void UMBSTMobileFireCombatProcessor::Execute(
 
     const float DeltaSeconds = FMath::Max(MassBattle->GetCalculatedStepTime(), 0.0f);
 
-    TArray<MBSTMobileFirePrivate::FPendingShot> PendingShots;
-    PendingShots.Reserve(64);
-
-    EntityQuery.ForEachEntityChunk(Context, [&](FMassExecutionContext& ChunkContext)
+    TMap<TSoftClassPtr<AMassBattleAgentRenderer> , FTransform> RendererOffsets;
     {
-        const FMBSTSingleTurretShared& TurretShared =
+            FParallelGatherer<TSoftClassPtr<AMassBattleAgentRenderer>> RendererClassGatherer;
+            {
+                TRACE_CPUPROFILER_EVENT_SCOPE_STR("MBSTMobileFireGatherRendererClasses");
+
+     MBForEachEntityChunk<true>( EntityQuery,Context, [&](FMassExecutionContext& ChunkContext)
+    {
+         const TConstArrayView<FVisualize> Visualizes = ChunkContext.GetFragmentView<FVisualize>();
+                        TArray<TSoftClassPtr<AMassBattleAgentRenderer>>& RendererClasses = RendererClassGatherer.GetThreadBuffer();
+                        for (const FVisualize& Visualize : Visualizes)
+                        {
+                            if (RendererClasses.IsEmpty() || RendererClasses.Last() != Visualize.RendererClass)
+                                                    {
+                                                        RendererClasses.AddUnique(Visualize.RendererClass);
+                                                    }
+                        }
+                    }, FMassEntityQuery::EParallelExecutionFlags::AutoBalance);
+                    RendererClassGatherer.Merge();
+                }
+                {
+                    TRACE_CPUPROFILER_EVENT_SCOPE_STR("MBSTMobileFireResolveRendererOffsets");
+                    TSet<TSoftClassPtr<AMassBattleAgentRenderer>> UniqueRendererClasses;
+                    for (const TSoftClassPtr<AMassBattleAgentRenderer>& RendererClass : RendererClassGatherer.Items)
+                    {
+                        if (RendererClass.IsNull())
+                        {
+                            continue;
+                        }
+                        bool bAlreadyPresent = false;
+                        UniqueRendererClasses.Add(RendererClass, &bAlreadyPresent);
+                        if (bAlreadyPresent)
+                        {
+                            continue;
+                        }
+                        if (UClass* ResolvedClass = RendererClass.LoadSynchronous())
+                        {
+                            RendererOffsets.Add(RendererClass, ResolvedClass->GetDefaultObject<AMassBattleAgentRenderer>()->Offset);
+                        }
+                    }
+                }
+            }
+            const TMap<TSoftClassPtr<AMassBattleAgentRenderer>, FTransform>& ResolvedRendererOffsets = RendererOffsets;
+            FParallelGatherer<MBSTMobileFirePrivate::FPendingShot> PendingShotGatherer;
+        
+            MBForEachEntityChunk<true>(EntityQuery, Context, [&](FMassExecutionContext& ChunkContext)
+            {
+                TArray<MBSTMobileFirePrivate::FPendingShot>& PendingShots = PendingShotGatherer.GetThreadBuffer();
+                PendingShots.Reserve(64); const FMBSTSingleTurretShared& TurretShared =
             ChunkContext.GetSharedFragment<FMBSTSingleTurretShared>();
         const FMBSTMobileFireShared& FireShared =
             ChunkContext.GetSharedFragment<FMBSTMobileFireShared>();
@@ -811,7 +856,8 @@ void UMBSTMobileFireCombatProcessor::Execute(
 
                     // Policy 1 owns horizontal aim with the chassis. The barrel may still pitch.
                     const FTransform RootWorld = UMBSTSingleTurretAsset::CalculateMeshRootWorldTransform(
-                        Locating, Rotating, Scaling, &Collider, &Move, &Moving, &Visualize);
+                        Locating, Rotating, Scaling, &Collider, &Move, &Moving, &Visualize ,
+                                            ResolvedRendererOffsets.Find(Visualize.RendererClass)  , true );
                     const MBSTMobileFirePrivate::FAimSolution Aim =
                         MBSTMobileFirePrivate::ComputeDesiredTurretAim(
                             *TurretShared.Layout,
@@ -833,7 +879,8 @@ void UMBSTMobileFireCombatProcessor::Execute(
                 else
                 {
                     const FTransform RootWorld = UMBSTSingleTurretAsset::CalculateMeshRootWorldTransform(
-                        Locating, Rotating, Scaling, &Collider, &Move, &Moving, &Visualize);
+                        Locating, Rotating, Scaling, &Collider, &Move, &Moving, &Visualize ,
+                                            ResolvedRendererOffsets.Find(Visualize.RendererClass)  , true );
                     const MBSTMobileFirePrivate::FAimSolution Aim =
                         MBSTMobileFirePrivate::ComputeDesiredTurretAim(
                             *TurretShared.Layout,
@@ -959,7 +1006,8 @@ void UMBSTMobileFireCombatProcessor::Execute(
             }
 
             const FTransform RootWorld = UMBSTSingleTurretAsset::CalculateMeshRootWorldTransform(
-                Locating, Rotating, Scaling, &Collider, &Move, &Moving, &Visualize);
+                Locating, Rotating, Scaling, &Collider, &Move, &Moving, &Visualize ,
+                                    ResolvedRendererOffsets.Find(Visualize.RendererClass)  , true );
             const float PreShotRecoil = TurretState.RecoilNormalized;
             const FTransform MuzzleWorld =
                 TurretShared.Layout->CalculateMuzzleWorldTransform(
@@ -1014,7 +1062,10 @@ void UMBSTMobileFireCombatProcessor::Execute(
                 TurretStates[EntityIndex],
                 TurretShared);
         }
-    });
+    } , FMassEntityQuery::EParallelExecutionFlags::AutoBalance ) ;
+    
+        PendingShotGatherer.Merge();
+        TArray<MBSTMobileFirePrivate::FPendingShot>& PendingShots = PendingShotGatherer.Items ;
 
     if (MassBattle->bDeterministic && PendingShots.Num() > 1)
     {

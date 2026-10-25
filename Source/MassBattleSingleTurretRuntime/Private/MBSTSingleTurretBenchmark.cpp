@@ -42,7 +42,7 @@
 #include "Misc/Parse.h"
 #include "NiagaraComponent.h"
 #include "RenderTimer.h"
-#include "Renderers/MassBattleAgentRenderer.h"
+#include "Rendering/MassBattleAgentRenderer.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
 #include "Subsystems/MassBattleSubsystem.h"

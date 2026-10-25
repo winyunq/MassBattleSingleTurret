@@ -46,7 +46,7 @@
 #include "NiagaraNodeCustomHlsl.h"
 #include "NiagaraSystem.h"
 #include "NiagaraTypes.h"
-#include "Renderers/MassBattleAgentRenderer.h"
+#include "Rendering/MassBattleAgentRenderer.h"
 #include "StaticMeshAttributes.h"
 #include "StaticMeshOperations.h"
 #include "StructUtils/InstancedStruct.h"

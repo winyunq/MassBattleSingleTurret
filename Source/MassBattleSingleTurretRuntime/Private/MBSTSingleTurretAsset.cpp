@@ -4,7 +4,7 @@
 #include "Fragments/Move.h"
 #include "Fragments/Render.h"
 #include "Fragments/Transform.h"
-#include "Renderers/MassBattleAgentRenderer.h"
+#include "Rendering/MassBattleAgentRenderer.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 #include "Misc/AutomationTest.h"
@@ -36,12 +36,21 @@ FTransform UMBSTSingleTurretAsset::CalculateMeshRootWorldTransform(
     const FCollider* Collider,
     const FMove* Move,
     const FMoving* Moving,
-    const FVisualize* Visualize)
+    const FVisualize* Visualize ,
+        const FTransform* ResolvedRendererOffset,
+        const bool bRendererOffsetResolved )
 {
     // Same mesh-root convention as MassBattleAgentRenderProcessor. Do not read
     // FVisualizing.Target*: that cache depends on visibility and render timing.
     FTransform Combined = Visualize ? FTransform(Visualize->Transform) : FTransform::Identity;
-    if (Visualize && !Visualize->RendererClass.IsNull())
+     if (bRendererOffsetResolved)
+        {
+            if (ResolvedRendererOffset)
+            {
+                Combined = Combined * *ResolvedRendererOffset;
+            }
+        }
+        else if (Visualize && !Visualize->RendererClass.IsNull())
     {
         if (UClass* RendererClass = Visualize->RendererClass.LoadSynchronous())
         {

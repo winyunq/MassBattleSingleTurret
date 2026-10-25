@@ -1,7 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "Renderers/MassBattleAgentRenderer.h"
+#include "Rendering/MassBattleAgentRenderer.h"
 #include "MBSTSingleTurretRenderer.generated.h"
 
 class UNiagaraComponent;
