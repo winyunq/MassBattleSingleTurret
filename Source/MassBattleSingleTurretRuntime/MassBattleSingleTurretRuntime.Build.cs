@@ -18,7 +18,7 @@ public class MassBattleSingleTurretRuntime : ModuleRules
             "MassBattle",
             "FlowFieldCanvas",
             "Niagara",
-            "AnimToTexture"
+            "MassBattleATT"
         });
 
         if (Target.Version.MajorVersion >= 5 && Target.Version.MinorVersion >= 8)

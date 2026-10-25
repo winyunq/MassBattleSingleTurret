@@ -15,7 +15,7 @@ public class MassBattleSingleTurretEditor : ModuleRules
             "MassBattleSingleTurretRuntime",
             "MassBattle",
             "Niagara",
-            "AnimToTexture"
+            "MassBattleATT"
         });
 
         if (Target.Version.MajorVersion >= 5 && Target.Version.MinorVersion >= 8)
@@ -34,7 +34,7 @@ public class MassBattleSingleTurretEditor : ModuleRules
             "RHI",
             "NiagaraEditor",
             "NiagaraCore",
-            "AnimToTextureEditor",
+            "MassBattleATTEditor",
             "MassAPI"
         });
     }

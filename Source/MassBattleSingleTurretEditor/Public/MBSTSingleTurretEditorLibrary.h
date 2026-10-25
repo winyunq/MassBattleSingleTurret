@@ -9,7 +9,7 @@
 class AActor;
 class AMassBattleAgentRenderer;
 class UAnimationAsset;
-class UAnimToTextureDataAsset;
+class UMassBattleATTDataAsset;
 class UMaterial;
 class UMaterialInterface;
 class UMaterialInstanceConstant;
@@ -185,7 +185,7 @@ public:
 
     UFUNCTION(BlueprintCallable, Category = "MassBattle|Single Turret|Editor")
     static bool ConfigureAndBakeAnimToTexture(
-        UAnimToTextureDataAsset* DataAsset,
+        UMassBattleATTDataAsset* DataAsset,
         USkeletalMeshComponent* DriverComponent,
         UStaticMesh* ArticulatedMesh,
         bool bRunBake,

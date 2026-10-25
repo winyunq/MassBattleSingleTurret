@@ -5,7 +5,7 @@
 #include "MBSTSingleTurretTypes.h"
 #include "MBSTSingleTurretAsset.generated.h"
 
-class UAnimToTextureDataAsset;
+class UMassBattleATTDataAsset;
 class UStaticMesh;
 struct FLocating;
 struct FRotating;
@@ -23,20 +23,13 @@ class MASSBATTLESINGLETURRETRUNTIME_API UMBSTSingleTurretAsset : public UDataAss
 
 public:
     /** Mesh-space joints must use the particle mesh root, not the collision center. */
-    static FTransform CalculateMeshRootWorldTransform(
-        const FLocating& Location,
-        const FRotating& Rotation,
-        const FScaling& Scaling,
-        const FCollider* Collider,
-        const FMove* Move,
-        const FMoving* Moving,
-        const FVisualize* Visualize);
+    static FTransform CalculateMeshRootWorldTransform(const FLocating& Location, const FRotating& Rotation, const FScaling& Scaling, const FCollider* Collider, const FMove* Move, const FMoving* Moving, const FVisualize* Visualize, const FTransform* ResolvedRendererOffset = nullptr , const bool bRendererOffsetResolved = false );
 
     UPROPERTY(BlueprintReadOnly, EditAnywhere, Category = "Generated")
     TObjectPtr<UStaticMesh> ArticulatedMesh = nullptr;
 
     UPROPERTY(BlueprintReadOnly, EditAnywhere, Category = "Generated")
-    TObjectPtr<UAnimToTextureDataAsset> VATDataAsset = nullptr;
+    TObjectPtr<UMassBattleATTDataAsset> VATDataAsset = nullptr;
 
     UPROPERTY(BlueprintReadOnly, EditAnywhere, Category = "Articulation")
     FVector3f TurretPivotObjectSpace = FVector3f::ZeroVector;

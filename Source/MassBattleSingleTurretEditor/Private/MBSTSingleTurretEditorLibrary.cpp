@@ -8,8 +8,8 @@
 #include "MBSTSingleTurretRenderer.h"
 #include "MBSTSingleTurretTypes.h"
 
-#include "AnimToTextureBPLibrary.h"
-#include "AnimToTextureDataAsset.h"
+#include "MassBattleATTBakeLibrary.h"
+#include "MassBattleATTDataAsset.h"
 #include "Animation/AnimationAsset.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Components/ChildActorComponent.h"
@@ -809,77 +809,10 @@ namespace MBSTEditorPrivate
         return Asset;
     }
 
-    static bool InvokeAnimationToTexture(UAnimToTextureDataAsset* DataAsset, FString& OutMessage)
-    {
-        UFunction* Function = UAnimToTextureBPLibrary::StaticClass()->FindFunctionByName(TEXT("AnimationToTexture"));
-        UObject* LibraryCDO = UAnimToTextureBPLibrary::StaticClass()->GetDefaultObject();
-        if (!Function || !LibraryCDO)
-        {
-            OutMessage = TEXT("AnimToTexture AnimationToTexture function was not found in this engine version.");
-            return false;
-        }
-
-        TArray<uint8> Params;
-        Params.SetNumZeroed(Function->ParmsSize);
-
-        bool bAssignedDataAsset = false;
-        FBoolProperty* ReturnProperty = nullptr;
-        for (TFieldIterator<FProperty> It(Function); It && (It->PropertyFlags & CPF_Parm); ++It)
-        {
-            FProperty* Property = *It;
-            if (Property->HasAnyPropertyFlags(CPF_ReturnParm))
-            {
-                ReturnProperty = CastField<FBoolProperty>(Property);
-                continue;
-            }
-
-            if (FObjectPropertyBase* ObjectProperty = CastField<FObjectPropertyBase>(Property))
-            {
-                if (DataAsset && DataAsset->IsA(ObjectProperty->PropertyClass))
-                {
-                    ObjectProperty->SetObjectPropertyValue(
-                        ObjectProperty->ContainerPtrToValuePtr<void>(Params.GetData()),
-                        DataAsset);
-                    bAssignedDataAsset = true;
-                }
-                continue;
-            }
-
-            // UE 5.2 exposed an additional RootTransform parameter; newer
-            // versions only expose DataAsset. Initialize it explicitly when present.
-            if (FStructProperty* StructProperty = CastField<FStructProperty>(Property))
-            {
-                if (StructProperty->Struct == TBaseStructure<FTransform>::Get())
-                {
-                    *StructProperty->ContainerPtrToValuePtr<FTransform>(Params.GetData()) = FTransform::Identity;
-                }
-            }
-        }
-
-        if (!bAssignedDataAsset)
-        {
-            OutMessage = TEXT("Could not bind the AnimToTexture data asset parameter by reflection.");
-            return false;
-        }
-
-        LibraryCDO->ProcessEvent(Function, Params.GetData());
-        if (ReturnProperty)
-        {
-            const bool bResult = ReturnProperty->GetPropertyValue(ReturnProperty->ContainerPtrToValuePtr<void>(Params.GetData()));
-            OutMessage = bResult
-                ? TEXT("AnimToTexture bake completed.")
-                : TEXT("AnimToTexture bake returned false. Check the template animation list, mode and UV channel.");
-            return bResult;
-        }
-
-        OutMessage = TEXT("AnimToTexture bake was invoked; this engine version exposes no Boolean return value.");
-        return true;
-    }
-
-    static UAnimToTextureDataAsset* CreateVATDataAsset(
+    static UMassBattleATTDataAsset* CreateVATDataAsset(
         const FString& PackagePath,
         const FString& BaseAssetName,
-        UAnimToTextureDataAsset* Template,
+        UMassBattleATTDataAsset* Template,
         TArray<FString>& OutMessages)
     {
         const FString AssetName = SanitizeAssetName(BaseAssetName + TEXT("_VAT"));
@@ -903,16 +836,16 @@ namespace MBSTEditorPrivate
             return nullptr;
         }
 
-        UAnimToTextureDataAsset* DataAsset = Template
-            ? DuplicateObject<UAnimToTextureDataAsset>(Template, Package, *AssetName)
-            : NewObject<UAnimToTextureDataAsset>(
+        UMassBattleATTDataAsset* DataAsset = Template
+            ? DuplicateObject<UMassBattleATTDataAsset>(Template, Package, *AssetName)
+            : NewObject<UMassBattleATTDataAsset>(
                 Package,
                 *AssetName,
                 RF_Public | RF_Standalone | RF_Transactional);
 
         if (!DataAsset)
         {
-            OutMessages.Add(TEXT("Failed to create the AnimToTexture data asset."));
+            OutMessages.Add(TEXT("Failed to create the MassBattleATT data asset."));
             return nullptr;
         }
 
@@ -3202,7 +3135,7 @@ UMassBattleAgentConfigDataAsset* UMBSTSingleTurretEditorLibrary::CreateSingleTur
 }
 
 bool UMBSTSingleTurretEditorLibrary::ConfigureAndBakeAnimToTexture(
-    UAnimToTextureDataAsset* DataAsset,
+    UMassBattleATTDataAsset* DataAsset,
     USkeletalMeshComponent* DriverComponent,
     UStaticMesh* ArticulatedMesh,
     const bool bRunBake,
@@ -3227,13 +3160,14 @@ bool UMBSTSingleTurretEditorLibrary::ConfigureAndBakeAnimToTexture(
 
     if (!bRunBake)
     {
-        OutMessage = TEXT("AnimToTexture data asset configured. Confirm animations/mode/UV channel, then run the bake.");
+        OutMessage = TEXT("MassBattleATT data asset configured. Confirm animations/mode/UV channel, then run the bake.");
         return true;
     }
 
-    FString BakeMessage;
-    const bool bBaked = MBSTEditorPrivate::InvokeAnimationToTexture(DataAsset, BakeMessage);
-    OutMessage = BakeMessage;
+    const bool bBaked = UMassBattleATTBakeLibrary::AnimationToTexture(DataAsset);
+    OutMessage = bBaked
+        ? TEXT("MassBattleATT bake completed.")
+        : TEXT("MassBattleATT bake failed. Check the template animation list, mode and UV channel.");
     if (bBaked)
     {
         OutMessage += TEXT(" The articulation material must multiply VAT displacement by VertexColor.B.");

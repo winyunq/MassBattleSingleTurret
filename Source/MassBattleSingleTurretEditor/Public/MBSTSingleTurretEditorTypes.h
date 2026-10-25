@@ -5,7 +5,7 @@
 #include "MBSTSingleTurretTypes.h"
 #include "MBSTSingleTurretEditorTypes.generated.h"
 
-class UAnimToTextureDataAsset;
+class UMassBattleATTDataAsset;
 class UMassBattleAgentConfigDataAsset;
 class UMBSTMobileFireProfile;
 class UMBSTSingleTurretAsset;
@@ -48,7 +48,7 @@ struct MASSBATTLESINGLETURRETEDITOR_API FMBSTActorToSingleTurretSettings
 
     /** Template carries animation list, mode, sample rate, precision and UV setup. */
     UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "VAT", meta = (EditCondition = "bCreateVATDataAsset"))
-    TObjectPtr<UAnimToTextureDataAsset> VATTemplateDataAsset = nullptr;
+    TObjectPtr<UMassBattleATTDataAsset> VATTemplateDataAsset = nullptr;
 
     UPROPERTY(BlueprintReadWrite, EditAnywhere, Category = "VAT", meta = (EditCondition = "bCreateVATDataAsset"))
     bool bRunVATBake = false;
@@ -95,7 +95,7 @@ struct MASSBATTLESINGLETURRETEDITOR_API FMBSTActorToSingleTurretResult
     TObjectPtr<UMBSTSingleTurretAsset> LayoutAsset = nullptr;
 
     UPROPERTY(BlueprintReadOnly, Category = "Result")
-    TObjectPtr<UAnimToTextureDataAsset> VATDataAsset = nullptr;
+    TObjectPtr<UMassBattleATTDataAsset> VATDataAsset = nullptr;
 
     /** A normal MassBattle AgentConfig whose ExtraData already carries turret support. */
     UPROPERTY(BlueprintReadOnly, Category = "Result")
